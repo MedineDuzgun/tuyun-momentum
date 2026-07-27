@@ -101,42 +101,41 @@ def get_conn():
 def init_db() -> None:
     conn = get_conn()
     if conn:
-        with conn.cursor() as cur:
-            cur.execute("""
-                CREATE TABLE IF NOT EXISTS ogrenciler (
-                    ogrenci_id BIGINT PRIMARY KEY,
-                    ad_soyad TEXT NOT NULL,
-                    telefon TEXT,
-                    kayit_tarihi TEXT
-                );
-            """)
-            conn.commit()
-            
-            cur.execute("""
-                CREATE TABLE IF NOT EXISTS haftalik_kayitlar (
-                    id SERIAL PRIMARY KEY,
-                    ogrenci_id BIGINT NOT NULL REFERENCES ogrenciler(ogrenci_id) ON DELETE CASCADE,
-                    hafta_no INT NOT NULL,
-                    durum TEXT NOT NULL,
-                    yukleme_zamani TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    CONSTRAINT unique_ogrenci_hafta UNIQUE(ogrenci_id, hafta_no)
-                );
-            """)
-            conn.commit()
-            
-            cur.execute("""
-                CREATE TABLE IF NOT EXISTS arama_notlari (
-                    id SERIAL PRIMARY KEY,
-                    ogrenci_id BIGINT NOT NULL REFERENCES ogrenciler(ogrenci_id) ON DELETE CASCADE,
-                    hafta_no INT NOT NULL,
-                    arama_sonucu TEXT NOT NULL,
-                    not_metni TEXT,
-                    arayan TEXT,
-                    kayit_zamani TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-                );
-            """)
-            conn.commit()
-        conn.close()
+        try:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    CREATE TABLE IF NOT EXISTS ogrenciler (
+                        ogrenci_id BIGINT PRIMARY KEY,
+                        ad_soyad TEXT NOT NULL,
+                        telefon TEXT,
+                        kayit_tarihi TEXT
+                    );
+                    
+                    CREATE TABLE IF NOT EXISTS haftalik_kayitlar (
+                        id SERIAL PRIMARY KEY,
+                        ogrenci_id BIGINT NOT NULL REFERENCES ogrenciler(ogrenci_id) ON DELETE CASCADE,
+                        hafta_no INT NOT NULL,
+                        durum TEXT NOT NULL,
+                        yukleme_zamani TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                        UNIQUE(ogrenci_id, hafta_no)
+                    );
+                    
+                    CREATE TABLE IF NOT EXISTS arama_notlari (
+                        id SERIAL PRIMARY KEY,
+                        ogrenci_id BIGINT NOT NULL REFERENCES ogrenciler(ogrenci_id) ON DELETE CASCADE,
+                        hafta_no INT NOT NULL,
+                        arama_sonucu TEXT NOT NULL,
+                        not_metni TEXT,
+                        arayan TEXT,
+                        kayit_zamani TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                    );
+                """)
+                conn.commit()
+        except Exception as e:
+            conn.rollback()
+            st.error(f"Tablo oluşturma hatası: {e}")
+        finally:
+            conn.close()
 
 
 def ogrencileri_kaydet(conn, df_ogrenci: pd.DataFrame) -> None:
