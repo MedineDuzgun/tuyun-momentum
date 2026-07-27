@@ -176,7 +176,7 @@ with tab1:
             df_pivot.columns = [f"{c}. Hafta" for c in df_pivot.columns]
             
             # Görselleştirme (✅ / ❌)
-            df_display = df_pivot.applymap(lambda x: "✅ Çözdü" if x == True else ("❌ Çözmedi" if x == False else "-"))
+            df_display = df_pivot.map(lambda x: "✅ Çözdü" if x == True else ("❌ Çözmedi" if x == False else "-"))
             st.dataframe(df_display, use_container_width=True)
         else:
             st.info("Henüz işlenmiş hafta verisi bulunmuyor.")
