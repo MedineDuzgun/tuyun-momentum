@@ -350,7 +350,7 @@ st.set_page_config(page_title="Tuyun Momentum Sistemi", page_icon="🎯", layout
 
 # Veritabanını Temiz ve Sıfırdan Kur
 
-    init_db()
+init_db()
    
 
 st.title("🎯 Tuyun Momentum Sistemi")
