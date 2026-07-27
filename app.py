@@ -103,22 +103,16 @@ def init_db() -> None:
     if conn:
         try:
             with conn.cursor() as cur:
-                # Eski yapıdan kalan uyumsuz tabloları sıfırla
-                cur.execute("DROP TABLE IF EXISTS arama_notlari CASCADE;")
-                cur.execute("DROP TABLE IF EXISTS haftalik_kayitlar CASCADE;")
-                cur.execute("DROP TABLE IF EXISTS ogrenciler CASCADE;")
-
-                # Doğru PostgreSQL Şeması
+                # Tablolar yoksa oluştur (VAR OLAN VERİYİ SİLMEZ)
                 cur.execute("""
-                    CREATE TABLE ogrenciler (
+                    CREATE TABLE IF NOT EXISTS ogrenciler (
                         ogrenci_id BIGINT PRIMARY KEY,
                         ad_soyad TEXT NOT NULL,
                         telefon TEXT,
                         kayit_tarihi TEXT
                     );
-                """)
-                cur.execute("""
-                    CREATE TABLE haftalik_kayitlar (
+                    
+                    CREATE TABLE IF NOT EXISTS haftalik_kayitlar (
                         id SERIAL PRIMARY KEY,
                         ogrenci_id BIGINT NOT NULL REFERENCES ogrenciler(ogrenci_id) ON DELETE CASCADE,
                         hafta_no INT NOT NULL,
@@ -126,9 +120,8 @@ def init_db() -> None:
                         yukleme_zamani TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                         UNIQUE(ogrenci_id, hafta_no)
                     );
-                """)
-                cur.execute("""
-                    CREATE TABLE arama_notlari (
+                    
+                    CREATE TABLE IF NOT EXISTS arama_notlari (
                         id SERIAL PRIMARY KEY,
                         ogrenci_id BIGINT NOT NULL REFERENCES ogrenciler(ogrenci_id) ON DELETE CASCADE,
                         hafta_no INT NOT NULL,
@@ -141,7 +134,7 @@ def init_db() -> None:
                 conn.commit()
         except Exception as e:
             conn.rollback()
-            st.error(f"Tablo oluşturma hatası: {e}")
+            st.error(f"Tablo kontrol hatası: {e}")
         finally:
             conn.close()
 
@@ -356,9 +349,9 @@ def genel_yorum_uret(ortalama_puan: float) -> str:
 st.set_page_config(page_title="Tuyun Momentum Sistemi", page_icon="🎯", layout="wide")
 
 # Veritabanını Temiz ve Sıfırdan Kur
-if "db_initialized" not in st.session_state:
+
     init_db()
-    st.session_state["db_initialized"] = True
+   
 
 st.title("🎯 Tuyun Momentum Sistemi")
 st.caption("Veritabanı: Supabase Cloud (Kalıcı Bulut Veritabanı)")
