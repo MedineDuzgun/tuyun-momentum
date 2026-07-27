@@ -110,6 +110,8 @@ def init_db() -> None:
                     kayit_tarihi TEXT
                 );
             """)
+            conn.commit()
+            
             cur.execute("""
                 CREATE TABLE IF NOT EXISTS haftalik_kayitlar (
                     id SERIAL PRIMARY KEY,
@@ -120,6 +122,8 @@ def init_db() -> None:
                     CONSTRAINT unique_ogrenci_hafta UNIQUE(ogrenci_id, hafta_no)
                 );
             """)
+            conn.commit()
+            
             cur.execute("""
                 CREATE TABLE IF NOT EXISTS arama_notlari (
                     id SERIAL PRIMARY KEY,
