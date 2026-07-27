@@ -103,6 +103,7 @@ def init_db() -> None:
     if conn:
         try:
             with conn.cursor() as cur:
+                # Ogrenciler Tablosu
                 cur.execute("""
                     CREATE TABLE IF NOT EXISTS ogrenciler (
                         ogrenci_id BIGINT PRIMARY KEY,
@@ -110,7 +111,15 @@ def init_db() -> None:
                         telefon TEXT,
                         kayit_tarihi TEXT
                     );
-                    
+                """)
+                
+                # Eksik sütunlar varsa (eski veritabanı yapısından kalan) otomatik ekle
+                cur.execute("ALTER TABLE ogrenciler ADD COLUMN IF NOT EXISTS ad_soyad TEXT;")
+                cur.execute("ALTER TABLE ogrenciler ADD COLUMN IF NOT EXISTS telefon TEXT;")
+                cur.execute("ALTER TABLE ogrenciler ADD COLUMN IF NOT EXISTS kayit_tarihi TEXT;")
+
+                # Haftalik Kayitlar Tablosu
+                cur.execute("""
                     CREATE TABLE IF NOT EXISTS haftalik_kayitlar (
                         id SERIAL PRIMARY KEY,
                         ogrenci_id BIGINT NOT NULL REFERENCES ogrenciler(ogrenci_id) ON DELETE CASCADE,
@@ -119,7 +128,10 @@ def init_db() -> None:
                         yukleme_zamani TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                         UNIQUE(ogrenci_id, hafta_no)
                     );
-                    
+                """)
+
+                # Arama Notlari Tablosu
+                cur.execute("""
                     CREATE TABLE IF NOT EXISTS arama_notlari (
                         id SERIAL PRIMARY KEY,
                         ogrenci_id BIGINT NOT NULL REFERENCES ogrenciler(ogrenci_id) ON DELETE CASCADE,
@@ -136,8 +148,6 @@ def init_db() -> None:
             st.error(f"Tablo oluşturma hatası: {e}")
         finally:
             conn.close()
-
-
 def ogrencileri_kaydet(conn, df_ogrenci: pd.DataFrame) -> None:
     with conn.cursor() as cur:
         for _, r in df_ogrenci.iterrows():
