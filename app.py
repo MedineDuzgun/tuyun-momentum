@@ -103,24 +103,22 @@ def init_db() -> None:
     if conn:
         try:
             with conn.cursor() as cur:
-                # Ogrenciler Tablosu
+                # Eski yapıdan kalan uyumsuz tabloları sıfırla
+                cur.execute("DROP TABLE IF EXISTS arama_notlari CASCADE;")
+                cur.execute("DROP TABLE IF EXISTS haftalik_kayitlar CASCADE;")
+                cur.execute("DROP TABLE IF EXISTS ogrenciler CASCADE;")
+
+                # Doğru PostgreSQL Şeması
                 cur.execute("""
-                    CREATE TABLE IF NOT EXISTS ogrenciler (
+                    CREATE TABLE ogrenciler (
                         ogrenci_id BIGINT PRIMARY KEY,
                         ad_soyad TEXT NOT NULL,
                         telefon TEXT,
                         kayit_tarihi TEXT
                     );
                 """)
-                
-                # Eksik sütunlar varsa (eski veritabanı yapısından kalan) otomatik ekle
-                cur.execute("ALTER TABLE ogrenciler ADD COLUMN IF NOT EXISTS ad_soyad TEXT;")
-                cur.execute("ALTER TABLE ogrenciler ADD COLUMN IF NOT EXISTS telefon TEXT;")
-                cur.execute("ALTER TABLE ogrenciler ADD COLUMN IF NOT EXISTS kayit_tarihi TEXT;")
-
-                # Haftalik Kayitlar Tablosu
                 cur.execute("""
-                    CREATE TABLE IF NOT EXISTS haftalik_kayitlar (
+                    CREATE TABLE haftalik_kayitlar (
                         id SERIAL PRIMARY KEY,
                         ogrenci_id BIGINT NOT NULL REFERENCES ogrenciler(ogrenci_id) ON DELETE CASCADE,
                         hafta_no INT NOT NULL,
@@ -129,10 +127,8 @@ def init_db() -> None:
                         UNIQUE(ogrenci_id, hafta_no)
                     );
                 """)
-
-                # Arama Notlari Tablosu
                 cur.execute("""
-                    CREATE TABLE IF NOT EXISTS arama_notlari (
+                    CREATE TABLE arama_notlari (
                         id SERIAL PRIMARY KEY,
                         ogrenci_id BIGINT NOT NULL REFERENCES ogrenciler(ogrenci_id) ON DELETE CASCADE,
                         hafta_no INT NOT NULL,
@@ -148,6 +144,8 @@ def init_db() -> None:
             st.error(f"Tablo oluşturma hatası: {e}")
         finally:
             conn.close()
+
+
 def ogrencileri_kaydet(conn, df_ogrenci: pd.DataFrame) -> None:
     with conn.cursor() as cur:
         for _, r in df_ogrenci.iterrows():
@@ -268,7 +266,7 @@ def ogrenci_metriklerini_hesapla(df_kayitlar: pd.DataFrame) -> pd.DataFrame:
 
     df = df_kayitlar.copy()
 
-    # Pandas 2.1+ için map kullanımı (Eski 179. satır hatası giderildi)
+    # Pandas 2.1+ uyumlu map kullanımı
     df["puan"] = df["durum"].map(PUAN_TABLOSU).fillna(0.0)
     temel = df.groupby("ogrenci_id")["puan"].sum().rename("temel_puan")
 
@@ -314,8 +312,7 @@ def arama_listesi_hesapla(df_kayitlar: pd.DataFrame):
     if risk.empty:
         return pd.DataFrame(columns=["ogrenci_id"]), son_hafta, onceki_hafta
 
-    # 2. Kural (Cooldown/Dinlendirme): 
-    # Son 2 hafta içinde (bu hafta ve bir önceki hafta) zaten aranmış olan öğrencileri getir
+    # 2. Kural (Cooldown/Dinlendirme):
     conn = get_conn()
     if conn:
         arananlar_df = pd.read_sql_query(
@@ -327,7 +324,6 @@ def arama_listesi_hesapla(df_kayitlar: pd.DataFrame):
     else:
         arananlar_df = pd.DataFrame()
 
-    # Eğer son 2 hafta içinde arandıysa arama listesinden çıkar (Dinlendirme kuralı)
     if not arananlar_df.empty:
         risk = risk[~risk["ogrenci_id"].isin(arananlar_df["ogrenci_id"])]
 
@@ -358,7 +354,11 @@ def genel_yorum_uret(ortalama_puan: float) -> str:
 # 5) STREAMLIT ARAYÜZÜ
 # ===================================================================
 st.set_page_config(page_title="Tuyun Momentum Sistemi", page_icon="🎯", layout="wide")
-init_db()
+
+# Veritabanını Temiz ve Sıfırdan Kur
+if "db_initialized" not in st.session_state:
+    init_db()
+    st.session_state["db_initialized"] = True
 
 st.title("🎯 Tuyun Momentum Sistemi")
 st.caption("Veritabanı: Supabase Cloud (Kalıcı Bulut Veritabanı)")
