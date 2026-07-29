@@ -134,12 +134,11 @@ def init_db() -> None:
                     );
                 """)
                 
-                # --- SADECE BU 4 SATIR EKLENECEK ---
+                # Tablo sütun güncellemeleri
                 cur.execute("ALTER TABLE arama_notlari ADD COLUMN IF NOT EXISTS arayan TEXT;")
                 cur.execute("ALTER TABLE arama_notlari ADD COLUMN IF NOT EXISTS hafta_index INT DEFAULT 1;")
                 cur.execute("ALTER TABLE deneme_kayitlari ADD COLUMN IF NOT EXISTS ay_adi TEXT DEFAULT 'Ocak';")
                 cur.execute("ALTER TABLE deneme_kayitlari ADD COLUMN IF NOT EXISTS deneme_no INT DEFAULT 1;")
-                # -----------------------------------
                 
                 conn.commit()
         except Exception as e:
@@ -190,10 +189,20 @@ def arama_notu_ekle(ogrenci_id: int, hafta_index: int, sonuc: str, not_metni: st
     conn = get_conn()
     if conn:
         with conn.cursor() as cur:
+            # NULL / Geçersiz tip korumaları
+            try:
+                safe_h_idx = int(hafta_index) if hafta_index is not None else 1
+            except (ValueError, TypeError):
+                safe_h_idx = 1
+
+            safe_arayan = str(arayan).strip() if arayan else "Belirtilmedi"
+            safe_not = str(not_metni).strip() if not_metni else ""
+            safe_sonuc = str(sonuc).strip() if sonuc else "Aranmadı"
+
             cur.execute(
                 """INSERT INTO arama_notlari (ogrenci_id, hafta_index, arama_sonucu, not_metni, arayan, kayit_zamani)
                    VALUES (%s, %s, %s, %s, %s, %s)""",
-                (ogrenci_id, hafta_index, sonuc, not_metni, arayan, datetime.now()),
+                (int(ogrenci_id), safe_h_idx, safe_sonuc, safe_not, safe_arayan, datetime.now()),
             )
             conn.commit()
         conn.close()
@@ -418,8 +427,15 @@ with tab1:
                     sonuc = st.selectbox("Sonuç", ARAMA_SONUCU_SECENEKLERI, key=f"res_{r['ogrenci_id']}")
                     not_metni = st.text_area("Not", key=f"note_{r['ogrenci_id']}")
                     arayan = st.text_input("Arayan", key=f"who_{r['ogrenci_id']}")
+                    
                     if st.form_submit_button("Kaydet"):
-                        arama_notu_ekle(int(r["ogrenci_id"]), int(son_h_idx), sonuc, not_metni, arayan)
+                        # Tip dönüşüm hatasını 0 riskine indiren güvenli yapı
+                        try:
+                            target_h_idx = int(son_h_idx) if son_h_idx is not None else 1
+                        except (ValueError, TypeError):
+                            target_h_idx = 1
+                        
+                        arama_notu_ekle(int(r["ogrenci_id"]), target_h_idx, sonuc, not_metni, arayan)
                         st.cache_data.clear()
                         st.success("Not eklendi.")
                         st.rerun()
@@ -447,6 +463,6 @@ with tab5:
     st.subheader("🗂️ Tüm Arama Geçmişi")
     if not df_aramalar.empty:
         birlesik = df_aramalar.merge(df_ogrenciler, on="ogrenci_id", how="left")
-        st.dataframe(birlesik[["kayit_zamani", "hafta_index", "ad_soyad", "arama_sonucu", "not_metni"]], use_container_width=True, hide_index=True)
+        st.dataframe(birlesik[["kayit_zamani", "hafta_index", "ad_soyad", "arayan", "arama_sonucu", "not_metni"]], use_container_width=True, hide_index=True)
     else:
         st.info("Arama kaydı bulunamadı.")
