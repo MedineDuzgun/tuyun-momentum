@@ -1,7 +1,7 @@
 """
 tuyun_momentum_app.py
 -----------------------
-Tuyun Akademi - Tuyun Momentum Sistemi (Aylık & Deneme Bazlı Güncel Sürüm)
+Tuyun Akademi - Tuyun Momentum Sistemi (Takvim Yılı Aylar Sürümü)
 """
 
 import psycopg2
@@ -20,7 +20,11 @@ PUAN_TABLOSU = {
 }
 MOMENTUM_BONUS = 0.5
 
-AYLAR = ["Eylül", "Ekim", "Kasım", "Aralık", "Ocak", "Şubat", "Mart", "Nisan", "Mayıs", "Haziran"]
+# Ocak'tan başlayıp Aralık'a kadar 12 ayın tamamı sıralı
+AYLAR = [
+    "Ocak", "Şubat", "Mart", "Nisan", "Mayıs", "Haziran",
+    "Temmuz", "Ağustos", "Eylül", "Ekim", "Kasım", "Aralık"
+]
 
 ARAMA_SONUCU_SECENEKLERI = [
     "Ulaşıldı - Olumlu / Devam Ediyor",
@@ -258,7 +262,6 @@ def ogrenci_metriklerini_hesapla(df_kayitlar: pd.DataFrame) -> pd.DataFrame:
     momentum_kayitlari = []
     for ogrenci_id, grup in df.groupby("ogrenci_id"):
         toplam_bonus = 0.0
-        # Öğrencinin katıldığı her ayı kontrol et
         for ay, ay_grubu in grup.groupby("ay_adi"):
             if len(ay_grubu) == 4 and all(ay_grubu["durum"] == "Vaktinde Çözdü"):
                 toplam_bonus += MOMENTUM_BONUS
@@ -279,7 +282,6 @@ def arama_listesi_hesapla(df_kayitlar: pd.DataFrame, df_aramalar: pd.DataFrame):
     if onceki_h_index < 1:
         return pd.DataFrame(columns=["ogrenci_id"]), son_h_index, None
 
-    # Son 2 kronolojik haftadaki durumlara bak
     pivot = df_kayitlar[df_kayitlar["hafta_index"].isin([onceki_h_index, son_h_index])]
     if pivot.empty:
         return pd.DataFrame(columns=["ogrenci_id"]), son_h_index, onceki_h_index
@@ -289,21 +291,17 @@ def arama_listesi_hesapla(df_kayitlar: pd.DataFrame, df_aramalar: pd.DataFrame):
     if son_h_index not in pivot_tbl.columns or onceki_h_index not in pivot_tbl.columns:
         return pd.DataFrame(columns=["ogrenci_id"]), son_h_index, onceki_h_index
 
-    # 1. Kural: Son 2 hafta üst üste "Çözmedi" olanlar
     risk = pivot_tbl[(pivot_tbl[onceki_h_index] == "Çözmedi") & (pivot_tbl[son_h_index] == "Çözmedi")].reset_index()
 
     if risk.empty:
         return pd.DataFrame(columns=["ogrenci_id"]), son_h_index, onceki_h_index
 
-    # 2. Kural: Daha önce bu ihlal dönemi için arama yapıldı mı?
     if not df_aramalar.empty:
-        # Son arama yapılan zaman diliminden sonraki durumları süz
         aranan_id_list = []
         for o_id in risk["ogrenci_id"]:
             ogrenci_aramalari = df_aramalar[(df_aramalar["ogrenci_id"] == o_id) & (df_aramalar["arama_sonucu"] != "Aranmadı")]
             if not ogrenci_aramalari.empty:
                 son_arama_hafta = ogrenci_aramalari["hafta_index"].max()
-                # Eğer arama son 2 haftadaki ihlal döneminde yapılmışsa tekrar listeye düşürme
                 if son_arama_hafta >= onceki_h_index:
                     aranan_id_list.append(o_id)
         
