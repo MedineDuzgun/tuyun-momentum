@@ -133,6 +133,14 @@ def init_db() -> None:
                         kayit_zamani TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                     );
                 """)
+                
+                # --- SADECE BU 4 SATIR EKLENECEK ---
+                cur.execute("ALTER TABLE arama_notlari ADD COLUMN IF NOT EXISTS arayan TEXT;")
+                cur.execute("ALTER TABLE arama_notlari ADD COLUMN IF NOT EXISTS hafta_index INT DEFAULT 1;")
+                cur.execute("ALTER TABLE deneme_kayitlari ADD COLUMN IF NOT EXISTS ay_adi TEXT DEFAULT 'Ocak';")
+                cur.execute("ALTER TABLE deneme_kayitlari ADD COLUMN IF NOT EXISTS deneme_no INT DEFAULT 1;")
+                # -----------------------------------
+                
                 conn.commit()
         except Exception as e:
             conn.rollback()
