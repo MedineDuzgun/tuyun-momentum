@@ -134,15 +134,17 @@ def init_db() -> None:
                     );
                 """)
                 
-                # Tablo sütun güncellemeleri ve NOT NULL kaldırmaları
+                # Tablo sütun güncellemeleri
                 cur.execute("ALTER TABLE arama_notlari ADD COLUMN IF NOT EXISTS arayan TEXT;")
                 cur.execute("ALTER TABLE arama_notlari ADD COLUMN IF NOT EXISTS hafta_index INT DEFAULT 1;")
+                cur.execute("ALTER TABLE arama_notlari ADD COLUMN IF NOT EXISTS hafta_no INT DEFAULT 1;")
                 cur.execute("ALTER TABLE deneme_kayitlari ADD COLUMN IF NOT EXISTS ay_adi TEXT DEFAULT 'Ocak';")
                 cur.execute("ALTER TABLE deneme_kayitlari ADD COLUMN IF NOT EXISTS deneme_no INT DEFAULT 1;")
                 
                 # Postgres kısıtlama esnetmeleri (NotNullViolation engeli için)
                 cur.execute("ALTER TABLE arama_notlari ALTER COLUMN arama_sonucu DROP NOT NULL;")
                 cur.execute("ALTER TABLE arama_notlari ALTER COLUMN hafta_index DROP NOT NULL;")
+                cur.execute("ALTER TABLE arama_notlari ALTER COLUMN hafta_no DROP NOT NULL;")
                 cur.execute("ALTER TABLE arama_notlari ALTER COLUMN not_metni DROP NOT NULL;")
                 cur.execute("ALTER TABLE arama_notlari ALTER COLUMN arayan DROP NOT NULL;")
                 
@@ -207,10 +209,11 @@ def arama_notu_ekle(ogrenci_id: int, hafta_index: int, sonuc: str, not_metni: st
                 safe_not = str(not_metni).strip() if (not_metni and str(not_metni).strip()) else "Not girilmedi"
                 safe_arayan = str(arayan).strip() if (arayan and str(arayan).strip()) else "Sistem / Belirtilmedi"
 
+                # Hem hafta_index hem de eski hafta_no sütununa güvenle yazıyoruz
                 cur.execute(
-                    """INSERT INTO arama_notlari (ogrenci_id, hafta_index, arama_sonucu, not_metni, arayan, kayit_zamani)
-                       VALUES (%s, %s, %s, %s, %s, %s)""",
-                    (safe_id, safe_h_idx, safe_sonuc, safe_not, safe_arayan, datetime.now()),
+                    """INSERT INTO arama_notlari (ogrenci_id, hafta_index, hafta_no, arama_sonucu, not_metni, arayan, kayit_zamani)
+                       VALUES (%s, %s, %s, %s, %s, %s, %s)""",
+                    (safe_id, safe_h_idx, safe_h_idx, safe_sonuc, safe_not, safe_arayan, datetime.now()),
                 )
                 conn.commit()
         except Exception as e:
@@ -328,9 +331,11 @@ def arama_listesi_hesapla(df_kayitlar: pd.DataFrame, df_aramalar: pd.DataFrame):
     if not df_aramalar.empty:
         aranan_id_list = []
         for o_id in risk["ogrenci_id"]:
+            # Hem hafta_index hem de hafta_no kontrollerine bak
+            col_to_check = "hafta_index" if "hafta_index" in df_aramalar.columns else "hafta_no"
             ogrenci_aramalari = df_aramalar[(df_aramalar["ogrenci_id"] == o_id) & (df_aramalar["arama_sonucu"] != "Aranmadı")]
             if not ogrenci_aramalari.empty:
-                son_arama_hafta = ogrenci_aramalari["hafta_index"].max()
+                son_arama_hafta = ogrenci_aramalari[col_to_check].max()
                 if son_arama_hafta >= onceki_h_index:
                     aranan_id_list.append(o_id)
         
@@ -474,6 +479,14 @@ with tab5:
     st.subheader("🗂️ Tüm Arama Geçmişi")
     if not df_aramalar.empty:
         birlesik = df_aramalar.merge(df_ogrenciler, on="ogrenci_id", how="left")
-        st.dataframe(birlesik[["kayit_zamani", "hafta_index", "ad_soyad", "arayan", "arama_sonucu", "not_metni"]], use_container_width=True, hide_index=True)
+        
+        # Gösterilecek sütun kontrolü
+        cols = ["kayit_zamani", "ad_soyad", "arayan", "arama_sonucu", "not_metni"]
+        if "hafta_index" in birlesik.columns:
+            cols.insert(1, "hafta_index")
+        elif "hafta_no" in birlesik.columns:
+            cols.insert(1, "hafta_no")
+            
+        st.dataframe(birlesik[cols], use_container_width=True, hide_index=True)
     else:
         st.info("Arama kaydı bulunamadı.")
