@@ -126,19 +126,25 @@ def init_db() -> None:
                     CREATE TABLE IF NOT EXISTS arama_notlari (
                         id SERIAL PRIMARY KEY,
                         ogrenci_id BIGINT NOT NULL REFERENCES ogrenciler(ogrenci_id) ON DELETE CASCADE,
-                        hafta_index INT NOT NULL,
-                        arama_sonucu TEXT NOT NULL,
+                        hafta_index INT,
+                        arama_sonucu TEXT,
                         not_metni TEXT,
                         arayan TEXT,
                         kayit_zamani TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                     );
                 """)
                 
-                # Tablo sütun güncellemeleri
+                # Tablo sütun güncellemeleri ve NOT NULL kaldırmaları
                 cur.execute("ALTER TABLE arama_notlari ADD COLUMN IF NOT EXISTS arayan TEXT;")
                 cur.execute("ALTER TABLE arama_notlari ADD COLUMN IF NOT EXISTS hafta_index INT DEFAULT 1;")
                 cur.execute("ALTER TABLE deneme_kayitlari ADD COLUMN IF NOT EXISTS ay_adi TEXT DEFAULT 'Ocak';")
                 cur.execute("ALTER TABLE deneme_kayitlari ADD COLUMN IF NOT EXISTS deneme_no INT DEFAULT 1;")
+                
+                # Postgres kısıtlama esnetmeleri (NotNullViolation engeli için)
+                cur.execute("ALTER TABLE arama_notlari ALTER COLUMN arama_sonucu DROP NOT NULL;")
+                cur.execute("ALTER TABLE arama_notlari ALTER COLUMN hafta_index DROP NOT NULL;")
+                cur.execute("ALTER TABLE arama_notlari ALTER COLUMN not_metni DROP NOT NULL;")
+                cur.execute("ALTER TABLE arama_notlari ALTER COLUMN arayan DROP NOT NULL;")
                 
                 conn.commit()
         except Exception as e:
@@ -188,20 +194,30 @@ def deneme_kayit_ekle(conn, ogrenci_id: int, ay_adi: str, deneme_no: int, hafta_
 def arama_notu_ekle(ogrenci_id: int, hafta_index: int, sonuc: str, not_metni: str, arayan: str) -> None:
     conn = get_conn()
     if conn:
-        with conn.cursor() as cur:
-            safe_id = int(ogrenci_id)
-            safe_h_idx = int(hafta_index) if hafta_index is not None else 1
-            safe_sonuc = str(sonuc).strip() if (sonuc and str(sonuc).strip()) else "Aranmadı"
-            safe_not = str(not_metni).strip() if (not_metni and str(not_metni).strip()) else "Not girilmedi"
-            safe_arayan = str(arayan).strip() if (arayan and str(arayan).strip()) else "Sistem / Belirtilmedi"
+        try:
+            with conn.cursor() as cur:
+                safe_id = int(ogrenci_id) if ogrenci_id is not None else 0
+                
+                try:
+                    safe_h_idx = int(hafta_index) if hafta_index is not None else 1
+                except (ValueError, TypeError):
+                    safe_h_idx = 1
+                
+                safe_sonuc = str(sonuc).strip() if (sonuc and str(sonuc).strip()) else "Aranmadı"
+                safe_not = str(not_metni).strip() if (not_metni and str(not_metni).strip()) else "Not girilmedi"
+                safe_arayan = str(arayan).strip() if (arayan and str(arayan).strip()) else "Sistem / Belirtilmedi"
 
-            cur.execute(
-                """INSERT INTO arama_notlari (ogrenci_id, hafta_index, arama_sonucu, not_metni, arayan, kayit_zamani)
-                   VALUES (%s, %s, %s, %s, %s, %s)""",
-                (safe_id, safe_h_idx, safe_sonuc, safe_not, safe_arayan, datetime.now()),
-            )
-            conn.commit()
-        conn.close()
+                cur.execute(
+                    """INSERT INTO arama_notlari (ogrenci_id, hafta_index, arama_sonucu, not_metni, arayan, kayit_zamani)
+                       VALUES (%s, %s, %s, %s, %s, %s)""",
+                    (safe_id, safe_h_idx, safe_sonuc, safe_not, safe_arayan, datetime.now()),
+                )
+                conn.commit()
+        except Exception as e:
+            conn.rollback()
+            st.error(f"Arama notu kaydedilirken hata oluştu: {e}")
+        finally:
+            conn.close()
 
 def tum_veriyi_oku():
     conn = get_conn()
@@ -426,14 +442,14 @@ with tab1:
                     
                     if st.form_submit_button("Kaydet"):
                         try:
+                            safe_ogrenci_id = int(r["ogrenci_id"])
                             target_h_idx = int(son_h_idx) if son_h_idx is not None else 1
-                        except (ValueError, TypeError):
-                            target_h_idx = 1
-                        
-                        arama_notu_ekle(int(r["ogrenci_id"]), target_h_idx, sonuc, not_metni, arayan)
-                        st.cache_data.clear()
-                        st.success("Not başarıyla eklendi!")
-                        st.rerun()
+                            arama_notu_ekle(safe_ogrenci_id, target_h_idx, sonuc, not_metni, arayan)
+                            st.cache_data.clear()
+                            st.success("Not başarıyla eklendi!")
+                            st.rerun()
+                        except Exception as e:
+                            st.error(f"Form kaydı hatası: {e}")
 
 with tab2:
     st.subheader("Scoreboard (Kümülatif)")
