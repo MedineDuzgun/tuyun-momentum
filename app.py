@@ -34,7 +34,7 @@ ARAMA_SONUCU_SECENEKLERI = [
 ]
 
 # ===================================================================
-# 2) DİNAMİK EXCEL TEMİZLEME VE SÜTUN DÜZENLEME
+# 2) DİNAMİK EXCEL TEMİZLEME VE MÜKERRER KAYIT ENGELLEME
 # ===================================================================
 def normalize_excel(uploaded_file) -> pd.DataFrame:
     if uploaded_file is None:
@@ -70,7 +70,8 @@ def normalize_excel(uploaded_file) -> pd.DataFrame:
     if "Ogrenci_ID" not in df.columns:
         df["Ogrenci_ID"] = 0
 
-    df["Ad_Soyad"] = df["Ad_Soyad"].astype(str).str.strip()
+    # İsmi standartlaştırarak Türkçe karakter uyuşmazlığından mükerrer kişi oluşmasını engelliyoruz
+    df["Ad_Soyad"] = df["Ad_Soyad"].astype(str).str.replace("i̇", "i").str.replace("I", "ı").str.strip().str.title()
 
     def parse_id(row):
         val = str(row["Ogrenci_ID"]).split(".")[0].strip()
@@ -137,14 +138,12 @@ def init_db() -> None:
                 # Tablo sütun güncellemeleri
                 cur.execute("ALTER TABLE arama_notlari ADD COLUMN IF NOT EXISTS arayan TEXT;")
                 cur.execute("ALTER TABLE arama_notlari ADD COLUMN IF NOT EXISTS hafta_index INT DEFAULT 1;")
-                cur.execute("ALTER TABLE arama_notlari ADD COLUMN IF NOT EXISTS hafta_no INT DEFAULT 1;")
                 cur.execute("ALTER TABLE deneme_kayitlari ADD COLUMN IF NOT EXISTS ay_adi TEXT DEFAULT 'Ocak';")
                 cur.execute("ALTER TABLE deneme_kayitlari ADD COLUMN IF NOT EXISTS deneme_no INT DEFAULT 1;")
                 
                 # Postgres kısıtlama esnetmeleri (NotNullViolation engeli için)
                 cur.execute("ALTER TABLE arama_notlari ALTER COLUMN arama_sonucu DROP NOT NULL;")
                 cur.execute("ALTER TABLE arama_notlari ALTER COLUMN hafta_index DROP NOT NULL;")
-                cur.execute("ALTER TABLE arama_notlari ALTER COLUMN hafta_no DROP NOT NULL;")
                 cur.execute("ALTER TABLE arama_notlari ALTER COLUMN not_metni DROP NOT NULL;")
                 cur.execute("ALTER TABLE arama_notlari ALTER COLUMN arayan DROP NOT NULL;")
                 
@@ -209,11 +208,10 @@ def arama_notu_ekle(ogrenci_id: int, hafta_index: int, sonuc: str, not_metni: st
                 safe_not = str(not_metni).strip() if (not_metni and str(not_metni).strip()) else "Not girilmedi"
                 safe_arayan = str(arayan).strip() if (arayan and str(arayan).strip()) else "Sistem / Belirtilmedi"
 
-                # Hem hafta_index hem de eski hafta_no sütununa güvenle yazıyoruz
                 cur.execute(
-                    """INSERT INTO arama_notlari (ogrenci_id, hafta_index, hafta_no, arama_sonucu, not_metni, arayan, kayit_zamani)
-                       VALUES (%s, %s, %s, %s, %s, %s, %s)""",
-                    (safe_id, safe_h_idx, safe_h_idx, safe_sonuc, safe_not, safe_arayan, datetime.now()),
+                    """INSERT INTO arama_notlari (ogrenci_id, hafta_index, arama_sonucu, not_metni, arayan, kayit_zamani)
+                       VALUES (%s, %s, %s, %s, %s, %s)""",
+                    (safe_id, safe_h_idx, safe_sonuc, safe_not, safe_arayan, datetime.now()),
                 )
                 conn.commit()
         except Exception as e:
@@ -309,39 +307,56 @@ def arama_listesi_hesapla(df_kayitlar: pd.DataFrame, df_aramalar: pd.DataFrame):
         return pd.DataFrame(columns=["ogrenci_id"]), None, None
 
     son_h_index = int(df_kayitlar["hafta_index"].max())
-    onceki_h_index = son_h_index - 1
+    onceki_h_index = son_h_index - 1 if son_h_index > 1 else 1
 
-    if onceki_h_index < 1:
-        return pd.DataFrame(columns=["ogrenci_id"]), son_h_index, None
+    riskli_ogrenciler = []
 
-    pivot = df_kayitlar[df_kayitlar["hafta_index"].isin([onceki_h_index, son_h_index])]
-    if pivot.empty:
-        return pd.DataFrame(columns=["ogrenci_id"]), son_h_index, onceki_h_index
-
-    pivot_tbl = pivot.pivot_table(index="ogrenci_id", columns="hafta_index", values="durum", aggfunc="first")
-
-    if son_h_index not in pivot_tbl.columns or onceki_h_index not in pivot_tbl.columns:
-        return pd.DataFrame(columns=["ogrenci_id"]), son_h_index, onceki_h_index
-
-    risk = pivot_tbl[(pivot_tbl[onceki_h_index] == "Çözmedi") & (pivot_tbl[son_h_index] == "Çözmedi")].reset_index()
-
-    if risk.empty:
-        return pd.DataFrame(columns=["ogrenci_id"]), son_h_index, onceki_h_index
-
-    if not df_aramalar.empty:
-        aranan_id_list = []
-        for o_id in risk["ogrenci_id"]:
-            # Hem hafta_index hem de hafta_no kontrollerine bak
-            col_to_check = "hafta_index" if "hafta_index" in df_aramalar.columns else "hafta_no"
-            ogrenci_aramalari = df_aramalar[(df_aramalar["ogrenci_id"] == o_id) & (df_aramalar["arama_sonucu"] != "Aranmadı")]
-            if not ogrenci_aramalari.empty:
-                son_arama_hafta = ogrenci_aramalari[col_to_check].max()
-                if son_arama_hafta >= onceki_h_index:
-                    aranan_id_list.append(o_id)
+    # Her öğrenci için zamandizisel analiz yapıyoruz
+    for o_id, grup in df_kayitlar.groupby("ogrenci_id"):
+        grup_sirali = grup.sort_values("hafta_index")
+        haftalar = grup_sirali["hafta_index"].tolist()
+        durumlar = grup_sirali["durum"].tolist()
         
-        risk = risk[~risk["ogrenci_id"].isin(aranan_id_list)]
+        # 1. En son yapılan arama haftasını tespit et
+        son_arama_hafta = 0
+        if not df_aramalar.empty:
+            col_check = "hafta_index" if "hafta_index" in df_aramalar.columns else "hafta_no"
+            ogrenci_aramalari = df_aramalar[
+                (df_aramalar["ogrenci_id"] == o_id) & 
+                (df_aramalar["arama_sonucu"] != "Aranmadı")
+            ]
+            if not ogrenci_aramalari.empty:
+                son_arama_hafta = int(ogrenci_aramalari[col_check].max())
 
-    return risk.rename(columns={onceki_h_index: "onceki_durum", son_h_index: "son_durum"}), son_h_index, onceki_h_index
+        # 2. Son aramadan SONRA en az 2 deneme daha üst üste "Çözmedi" durumunda mı?
+        for i in range(len(durumlar) - 1):
+            h1, h2 = haftalar[i], haftalar[i+1]
+            d1, d2 = durumlar[i], durumlar[i+1]
+            
+            if h1 > son_arama_hafta and h2 > son_arama_hafta:
+                if d1 == "Çözmedi" and d2 == "Çözmedi":
+                    riskli_ogrenciler.append(o_id)
+                    break
+            elif son_arama_hafta == 0:  # Hiç aranmamışsa ve geçmişte 2 hafta çözemediyse
+                if d1 == "Çözmedi" and d2 == "Çözmedi":
+                    riskli_ogrenciler.append(o_id)
+                    break
+
+    if not riskli_ogrenciler:
+        return pd.DataFrame(columns=["ogrenci_id"]), son_h_index, onceki_h_index
+
+    risk_df = pd.DataFrame({"ogrenci_id": riskli_ogrenciler})
+
+    son_durumlar = df_kayitlar[df_kayitlar["hafta_index"] == son_h_index][["ogrenci_id", "durum"]].rename(columns={"durum": "son_durum"})
+    onceki_durumlar = df_kayitlar[df_kayitlar["hafta_index"] == onceki_h_index][["ogrenci_id", "durum"]].rename(columns={"durum": "onceki_durum"})
+
+    risk_df = risk_df.merge(son_durumlar, on="ogrenci_id", how="left")
+    risk_df = risk_df.merge(onceki_durumlar, on="ogrenci_id", how="left")
+
+    risk_df["son_durum"] = risk_df["son_durum"].fillna("Çözmedi")
+    risk_df["onceki_durum"] = risk_df["onceki_durum"].fillna("Çözmedi")
+
+    return risk_df, son_h_index, onceki_h_index
 
 def whatsapp_mesaji_olustur(ad_soyad: str) -> str:
     ilk_isim = str(ad_soyad).split()[0]
@@ -362,7 +377,7 @@ def genel_yorum_uret(ortalama_puan: float) -> str:
         return "⚠️ Sınıf ortalaması negatif. 'Çözmedi' sayısı yüksek."
 
 # ===================================================================
-# 5) STREAMLIT ARAYÜZÜ
+# 5) STREAMLIT ARAYÜZÜ (TAM 5 TAB)
 # ===================================================================
 st.set_page_config(page_title="Tuyun Momentum Sistemi", page_icon="🎯", layout="wide")
 
@@ -480,10 +495,10 @@ with tab5:
     if not df_aramalar.empty:
         birlesik = df_aramalar.merge(df_ogrenciler, on="ogrenci_id", how="left")
         
-        # 1. Kayıt Zamanını Daha Şık Formatlama (YYYY-AA-GG SS:DK)
+        # 1. Kayıt Zamanını Formatlama (GG.AA.YYYY SS:DK)
         birlesik["kayit_zamani"] = pd.to_datetime(birlesik["kayit_zamani"]).dt.strftime("%d.%m.%Y %H:%M")
         
-        # 2. Gösterilecek ve İsimlendirilecek Sütunlar
+        # 2. Gösterilecek Sütunların Düzenli ve Türkçe İsmi
         sutun_haritasi = {
             "kayit_zamani": "Kayıt Tarihi",
             "hafta_index": "Hafta",
@@ -495,7 +510,6 @@ with tab5:
             "not_metni": "Arama Notu"
         }
         
-        # Sütun sırasını belirleyip isimlerini değiştiriyoruz
         mevcut_sutunlar = [col for col in sutun_haritasi.keys() if col in birlesik.columns]
         gosterilecek_df = birlesik[mevcut_sutunlar].rename(columns=sutun_haritasi)
         
