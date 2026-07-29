@@ -480,13 +480,25 @@ with tab5:
     if not df_aramalar.empty:
         birlesik = df_aramalar.merge(df_ogrenciler, on="ogrenci_id", how="left")
         
-        # Gösterilecek sütun kontrolü
-        cols = ["kayit_zamani", "ad_soyad", "arayan", "arama_sonucu", "not_metni"]
-        if "hafta_index" in birlesik.columns:
-            cols.insert(1, "hafta_index")
-        elif "hafta_no" in birlesik.columns:
-            cols.insert(1, "hafta_no")
-            
-        st.dataframe(birlesik[cols], use_container_width=True, hide_index=True)
+        # 1. Kayıt Zamanını Daha Şık Formatlama (YYYY-AA-GG SS:DK)
+        birlesik["kayit_zamani"] = pd.to_datetime(birlesik["kayit_zamani"]).dt.strftime("%d.%m.%Y %H:%M")
+        
+        # 2. Gösterilecek ve İsimlendirilecek Sütunlar
+        sutun_haritasi = {
+            "kayit_zamani": "Kayıt Tarihi",
+            "hafta_index": "Hafta",
+            "ogrenci_id": "Öğrenci ID",
+            "ad_soyad": "Ad Soyad",
+            "telefon": "Telefon",
+            "arayan": "Arayan",
+            "arama_sonucu": "Arama Sonucu",
+            "not_metni": "Arama Notu"
+        }
+        
+        # Sütun sırasını belirleyip isimlerini değiştiriyoruz
+        mevcut_sutunlar = [col for col in sutun_haritasi.keys() if col in birlesik.columns]
+        gosterilecek_df = birlesik[mevcut_sutunlar].rename(columns=sutun_haritasi)
+        
+        st.dataframe(gosterilecek_df, use_container_width=True, hide_index=True)
     else:
         st.info("Arama kaydı bulunamadı.")
