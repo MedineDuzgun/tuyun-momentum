@@ -189,7 +189,6 @@ def arama_notu_ekle(ogrenci_id: int, hafta_index: int, sonuc: str, not_metni: st
     conn = get_conn()
     if conn:
         with conn.cursor() as cur:
-            # Boş gelen (None veya sadece boşluk içeren) değerleri güvenli hale getiriyoruz
             safe_id = int(ogrenci_id)
             safe_h_idx = int(hafta_index) if hafta_index is not None else 1
             safe_sonuc = str(sonuc).strip() if (sonuc and str(sonuc).strip()) else "Aranmadı"
@@ -417,7 +416,7 @@ with tab1:
         goster = arama_listesi[["ogrenci_id", "ad_soyad", "telefon", "onceki_durum", "son_durum"]]
         st.dataframe(goster, use_container_width=True, hide_index=True)
 
-       for _, r in arama_listesi.iterrows():
+        for _, r in arama_listesi.iterrows():
             with st.expander(f"{r['ad_soyad']} (ID {r['ogrenci_id']})"):
                 st.text_area("WhatsApp Mesajı", value=whatsapp_mesaji_olustur(r["ad_soyad"]), height=100, key=f"msg_{r['ogrenci_id']}")
                 with st.form(key=f"form_{r['ogrenci_id']}"):
@@ -430,12 +429,13 @@ with tab1:
                             target_h_idx = int(son_h_idx) if son_h_idx is not None else 1
                         except (ValueError, TypeError):
                             target_h_idx = 1
-                    
+                        
                         arama_notu_ekle(int(r["ogrenci_id"]), target_h_idx, sonuc, not_metni, arayan)
                         st.cache_data.clear()
                         st.success("Not başarıyla eklendi!")
                         st.rerun()
-                        
+
+with tab2:
     st.subheader("Scoreboard (Kümülatif)")
     siralanmis = metrikler.sort_values("toplam_puan", ascending=False).reset_index(drop=True)
     st.dataframe(siralanmis[["ogrenci_id", "ad_soyad", "temel_puan", "momentum_bonusu", "toplam_puan"]], use_container_width=True, hide_index=True)
