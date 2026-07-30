@@ -1,7 +1,7 @@
 """
 tuyun_momentum_app.py
 -----------------------
-Tuyun Akademi - Tuyun Momentum Sistemi (Takvim Yılı Aylar Sürümü)
+Tuyun Akademi - Tuyun Momentum Sistemi (Dinamik Deneme Sayısı Sürümü)
 """
 
 import psycopg2
@@ -288,12 +288,12 @@ def ogrenci_metriklerini_hesapla(df_kayitlar: pd.DataFrame) -> pd.DataFrame:
     df["puan"] = df["durum"].map(PUAN_TABLOSU).fillna(0.0)
     temel = df.groupby("ogrenci_id")["puan"].sum().rename("temel_puan")
 
-    # Aylık 4/4 Yapanlara Momentum Bonusu (+0.5)
+    # Aylık girilen tüm denemeleri (en az 4 tane olmak şartıyla) Vaktinde Çözene Momentum Bonusu (+0.5)
     momentum_kayitlari = []
     for ogrenci_id, grup in df.groupby("ogrenci_id"):
         toplam_bonus = 0.0
         for ay, ay_grubu in grup.groupby("ay_adi"):
-            if len(ay_grubu) == 4 and all(ay_grubu["durum"] == "Vaktinde Çözdü"):
+            if len(ay_grubu) >= 4 and all(ay_grubu["durum"] == "Vaktinde Çözdü"):
                 toplam_bonus += MOMENTUM_BONUS
         momentum_kayitlari.append({"ogrenci_id": ogrenci_id, "momentum_bonusu": toplam_bonus})
 
@@ -393,7 +393,9 @@ with st.sidebar:
     file_cozmeyenler = st.file_uploader("2. Çözmeyenler Listesi (.xlsx)", type=["xlsx", "xls"], key="cozmeyenler")
 
     secilen_ay = st.selectbox("Hangi Ay?", options=AYLAR)
-    deneme_no = st.radio("Ayın Kaçıncı Denemesi?", options=[1, 2, 3, 4], horizontal=True)
+    
+    # Sınırsız / Esnek Deneme Sayısı Girişi
+    deneme_no = st.number_input("Ayın Kaçıncı Denemesi?", min_value=1, max_value=20, value=1, step=1)
 
     if st.button("✅ İki Listeyi İşle ve Kaydet", type="primary"):
         if file_cozenler is None and file_cozmeyenler is None:
