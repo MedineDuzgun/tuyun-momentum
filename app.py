@@ -1,10 +1,11 @@
 """
 tuyun_momentum_app.py
 -----------------------
-Tuyun Akademi - Tuyun Momentum Sistemi (Sabit SHA-256 ID & Dinamik Deneme Sayısı Sürümü)
+Tuyun Akademi - Tuyun Momentum Sistemi (Sabit SHA-256 ID & Dinamik Deneme Sayısı Sürümü - Hız Optimize Edilmiş)
 """
 
 import psycopg2
+from psycopg2.extras import execute_batch
 from datetime import datetime
 import pandas as pd
 import streamlit as st
@@ -21,10 +22,9 @@ PUAN_TABLOSU = {
 }
 MOMENTUM_BONUS = 0.5
 
-# Ocak'tan başlayıp Aralık'a kadar 12 ayın tamamı sıralı
 AYLAR = [
     "Ocak", "Şubat", "Mart", "Nisan", "Mayıs", "Haziran",
-    "Temmuz", "Ağustos", "Eylül", "Ekim", "Kasım", "Aralık"
+    "Temmuz", "Ağustos", "Eylul", "Ekim", "Kasım", "Aralık"
 ]
 
 ARAMA_SONUCU_SECENEKLERI = [
@@ -71,12 +71,10 @@ def normalize_excel(uploaded_file) -> pd.DataFrame:
     if "Ogrenci_ID" not in df.columns:
         df["Ogrenci_ID"] = 0
 
-    # İsmi standartlaştırarak Türkçe karakter uyuşmazlığından mükerrer kişi oluşmasını engelliyoruz
     df["Ad_Soyad"] = df["Ad_Soyad"].astype(str).str.replace("i̇", "i").str.replace("I", "ı").str.strip().str.title()
 
     def parse_id(row):
         val = str(row["Ogrenci_ID"]).split(".")[0].strip()
-        # DEĞİŞİKLİK 1: Python'ın değişken hash() fonksiyonu yerine Sabit/Kararlı SHA-256 ID üretimi
         if val in ["0", "nan", "None", "", "null"]:
             name_clean = str(row["Ad_Soyad"]).strip().lower()
             hash_val = hashlib.sha256(name_clean.encode('utf-8')).hexdigest()
@@ -141,13 +139,11 @@ def init_db() -> None:
                     );
                 """)
                 
-                # Tablo sütun güncellemeleri
                 cur.execute("ALTER TABLE arama_notlari ADD COLUMN IF NOT EXISTS arayan TEXT;")
                 cur.execute("ALTER TABLE arama_notlari ADD COLUMN IF NOT EXISTS hafta_index INT DEFAULT 1;")
                 cur.execute("ALTER TABLE deneme_kayitlari ADD COLUMN IF NOT EXISTS ay_adi TEXT DEFAULT 'Ocak';")
                 cur.execute("ALTER TABLE deneme_kayitlari ADD COLUMN IF NOT EXISTS deneme_no INT DEFAULT 1;")
                 
-                # Postgres kısıtlama esnetmeleri (NotNullViolation engeli için)
                 cur.execute("ALTER TABLE arama_notlari ALTER COLUMN arama_sonucu DROP NOT NULL;")
                 cur.execute("ALTER TABLE arama_notlari ALTER COLUMN hafta_index DROP NOT NULL;")
                 cur.execute("ALTER TABLE arama_notlari ALTER COLUMN not_metni DROP NOT NULL;")
@@ -162,53 +158,29 @@ def init_db() -> None:
 
 def ogrencileri_kaydet(conn, df_ogrenci: pd.DataFrame) -> None:
     with conn.cursor() as cur:
-        # DEĞİŞİKLİK 2A: Veritabanında ismi olan öğrencinin ID'sini koru
         cur.execute("SELECT ad_soyad, ogrenci_id FROM ogrenciler;")
         mevcut_ogrenciler = {row[0].strip().lower(): row[1] for row in cur.fetchall()}
+
+        kayit_verileri = []
+        bugun = datetime.now().strftime("%Y-%m-%d")
 
         for _, r in df_ogrenci.iterrows():
             ad = str(r["Ad_Soyad"]).strip()
             ad_key = ad.lower()
             
-            if ad_key in mevcut_ogrenciler:
-                o_id = mevcut_ogrenciler[ad_key]
-            else:
-                o_id = int(r["Ogrenci_ID"])
+            o_id = mevcut_ogrenciler.get(ad_key, int(r["Ogrenci_ID"]))
+            kayit_verileri.append((o_id, ad, str(r.get("Telefon", "")), bugun))
 
-            cur.execute(
-                """INSERT INTO ogrenciler (ogrenci_id, ad_soyad, telefon, kayit_tarihi)
-                   VALUES (%s, %s, %s, %s)
-                   ON CONFLICT(ogrenci_id) DO UPDATE SET
-                       ad_soyad=EXCLUDED.ad_soyad,
-                       telefon=EXCLUDED.telefon,
-                       kayit_tarihi=EXCLUDED.kayit_tarihi""",
-                (
-                    o_id,
-                    ad,
-                    str(r.get("Telefon", "")),
-                    datetime.now().strftime("%Y-%m-%d"),
-                ),
-            )
-
-def deneme_kayit_ekle(conn, ogrenci_id: int, ay_adi: str, deneme_no: int, hafta_index: int, durum: str) -> None:
-    durum_val = str(durum).strip() if durum else "Muaf"
-    with conn.cursor() as cur:
-        cur.execute(
-            """INSERT INTO deneme_kayitlari (ogrenci_id, ay_adi, deneme_no, hafta_index, durum, yukleme_zamani)
-               VALUES (%s, %s, %s, %s, %s, %s)
-               ON CONFLICT(ogrenci_id, ay_adi, deneme_no) DO UPDATE SET
-                   durum=EXCLUDED.durum,
-                   hafta_index=EXCLUDED.hafta_index,
-                   yukleme_zamani=EXCLUDED.yukleme_zamani""",
-            (
-                int(ogrenci_id),
-                ay_adi,
-                int(deneme_no),
-                int(hafta_index),
-                durum_val,
-                datetime.now(),
-            ),
-        )
+        query = """
+            INSERT INTO ogrenciler (ogrenci_id, ad_soyad, telefon, kayit_tarihi)
+            VALUES (%s, %s, %s, %s)
+            ON CONFLICT(ogrenci_id) DO UPDATE SET
+                ad_soyad=EXCLUDED.ad_soyad,
+                telefon=EXCLUDED.telefon,
+                kayit_tarihi=EXCLUDED.kayit_tarihi
+        """
+        # HIZLANDIRMA: Teker teker değil, Toplu (Batch) Insert
+        execute_batch(cur, query, kayit_verileri)
 
 def arama_notu_ekle(ogrenci_id: int, hafta_index: int, sonuc: str, not_metni: str, arayan: str) -> None:
     conn = get_conn()
@@ -232,12 +204,15 @@ def arama_notu_ekle(ogrenci_id: int, hafta_index: int, sonuc: str, not_metni: st
                     (safe_id, safe_h_idx, safe_sonuc, safe_not, safe_arayan, datetime.now()),
                 )
                 conn.commit()
+                st.cache_data.clear() # Önbelleği temizle
         except Exception as e:
             conn.rollback()
             st.error(f"Arama notu kaydedilirken hata oluştu: {e}")
         finally:
             conn.close()
 
+# ÖNBELLEK DÜZELTMESİ: ttl koyarak sürekli stale veri kalması önlendi
+@st.cache_data(ttl=60, show_spinner=False)
 def tum_veriyi_oku():
     conn = get_conn()
     if not conn:
@@ -280,18 +255,34 @@ def cift_excel_islem_ve_yukle(file_cozenler, file_cozmeyenler, ay_adi: str, dene
     ogrencileri_kaydet(conn, df_birlesik)
     h_idx = sonraki_hafta_index()
 
-    # DEĞİŞİKLİK 2B: Deneme kaydı yaparken DB'deki gerçek/sabitleşmiş ID'yi çekip kaydet
-    for _, r in df_birlesik.iterrows():
-        cur = conn.cursor()
-        cur.execute("SELECT ogrenci_id FROM ogrenciler WHERE LOWER(ad_soyad) = %s", (str(r["Ad_Soyad"]).strip().lower(),))
-        fetched = cur.fetchone()
-        real_id = fetched[0] if fetched else int(r["Ogrenci_ID"])
-        cur.close()
+    cur = conn.cursor()
+    cur.execute("SELECT LOWER(ad_soyad), ogrenci_id FROM ogrenciler")
+    id_map = {row[0]: row[1] for row in cur.fetchall()}
 
-        deneme_kayit_ekle(conn, real_id, ay_adi, deneme_no, h_idx, r["Durum"])
+    deneme_verileri = []
+    zaman_simdi = datetime.now()
+
+    for _, r in df_birlesik.iterrows():
+        ad_clean = str(r["Ad_Soyad"]).strip().lower()
+        real_id = id_map.get(ad_clean, int(r["Ogrenci_ID"]))
+        durum_val = str(r["Durum"]).strip() if r["Durum"] else "Muaf"
+        deneme_verileri.append((real_id, ay_adi, int(deneme_no), int(h_idx), durum_val, zaman_simdi))
+
+    deneme_query = """
+        INSERT INTO deneme_kayitlari (ogrenci_id, ay_adi, deneme_no, hafta_index, durum, yukleme_zamani)
+        VALUES (%s, %s, %s, %s, %s, %s)
+        ON CONFLICT(ogrenci_id, ay_adi, deneme_no) DO UPDATE SET
+            durum=EXCLUDED.durum,
+            hafta_index=EXCLUDED.hafta_index,
+            yukleme_zamani=EXCLUDED.yukleme_zamani
+    """
+    # HIZLANDIRMA: Teker teker SQL döngüsü yerine toplu execute_batch
+    execute_batch(cur, deneme_query, deneme_verileri)
+    cur.close()
 
     conn.commit()
     conn.close()
+    st.cache_data.clear()
     return len(df_birlesik)
 
 def veritabanini_sifirla() -> None:
@@ -301,6 +292,7 @@ def veritabanini_sifirla() -> None:
             cur.execute("TRUNCATE TABLE arama_notlari, deneme_kayitlari, ogrenciler RESTART IDENTITY CASCADE;")
             conn.commit()
         conn.close()
+        st.cache_data.clear()
 
 # ===================================================================
 # 4) İŞ MANTIĞI HESAPLAMALARI
@@ -313,7 +305,6 @@ def ogrenci_metriklerini_hesapla(df_kayitlar: pd.DataFrame) -> pd.DataFrame:
     df["puan"] = df["durum"].map(PUAN_TABLOSU).fillna(0.0)
     temel = df.groupby("ogrenci_id")["puan"].sum().rename("temel_puan")
 
-    # Aylık girilen tüm denemeleri (en az 4 tane olmak şartıyla) Vaktinde Çözene Momentum Bonusu (+0.5)
     momentum_kayitlari = []
     for ogrenci_id, grup in df.groupby("ogrenci_id"):
         toplam_bonus = 0.0
@@ -336,13 +327,11 @@ def arama_listesi_hesapla(df_kayitlar: pd.DataFrame, df_aramalar: pd.DataFrame):
 
     riskli_ogrenciler = []
 
-    # Her öğrenci için zamandizisel analiz yapıyoruz
     for o_id, grup in df_kayitlar.groupby("ogrenci_id"):
         grup_sirali = grup.sort_values("hafta_index")
         haftalar = grup_sirali["hafta_index"].tolist()
         durumlar = grup_sirali["durum"].tolist()
         
-        # 1. En son yapılan arama haftasını tespit et
         son_arama_hafta = 0
         if not df_aramalar.empty:
             col_check = "hafta_index" if "hafta_index" in df_aramalar.columns else "hafta_no"
@@ -353,7 +342,6 @@ def arama_listesi_hesapla(df_kayitlar: pd.DataFrame, df_aramalar: pd.DataFrame):
             if not ogrenci_aramalari.empty:
                 son_arama_hafta = int(ogrenci_aramalari[col_check].max())
 
-        # 2. Son aramadan SONRA en az 2 deneme daha üst üste "Çözmedi" durumunda mı?
         for i in range(len(durumlar) - 1):
             h1, h2 = haftalar[i], haftalar[i+1]
             d1, d2 = durumlar[i], durumlar[i+1]
@@ -362,7 +350,7 @@ def arama_listesi_hesapla(df_kayitlar: pd.DataFrame, df_aramalar: pd.DataFrame):
                 if d1 == "Çözmedi" and d2 == "Çözmedi":
                     riskli_ogrenciler.append(o_id)
                     break
-            elif son_arama_hafta == 0:  # Hiç aranmamışsa ve geçmişte 2 hafta çözemediyse
+            elif son_arama_hafta == 0:
                 if d1 == "Çözmedi" and d2 == "Çözmedi":
                     riskli_ogrenciler.append(o_id)
                     break
@@ -402,7 +390,7 @@ def genel_yorum_uret(ortalama_puan: float) -> str:
         return "⚠️ Sınıf ortalaması negatif. 'Çözmedi' sayısı yüksek."
 
 # ===================================================================
-# 5) STREAMLIT ARAYÜZÜ (TAM 5 TAB)
+# 5) STREAMLIT ARAYÜZÜ
 # ===================================================================
 st.set_page_config(page_title="Tuyun Momentum Sistemi", page_icon="🎯", layout="wide")
 
@@ -418,8 +406,6 @@ with st.sidebar:
     file_cozmeyenler = st.file_uploader("2. Çözmeyenler Listesi (.xlsx)", type=["xlsx", "xls"], key="cozmeyenler")
 
     secilen_ay = st.selectbox("Hangi Ay?", options=AYLAR)
-    
-    # Sınırsız / Esnek Deneme Sayısı Girişi
     deneme_no = st.number_input("Ayın Kaçıncı Denemesi?", min_value=1, max_value=20, value=1, step=1)
 
     if st.button("✅ İki Listeyi İşle ve Kaydet", type="primary"):
@@ -427,7 +413,6 @@ with st.sidebar:
             st.error("Lütfen en az bir Excel dosyası yükleyin.")
         else:
             toplam_kayit = cift_excel_islem_ve_yukle(file_cozenler, file_cozmeyenler, secilen_ay, int(deneme_no))
-            st.cache_data.clear()
             st.success(f"{secilen_ay} Ayı - Deneme {deneme_no}: Toplam {toplam_kayit} öğrenci verisi işlendi.")
             st.rerun()
 
@@ -442,7 +427,6 @@ with st.sidebar:
     if st.button("🗑️ Veritabanını Sıfırla", type="secondary"):
         if onay:
             veritabanini_sifirla()
-            st.cache_data.clear()
             st.warning("Veritabanı tamamen sıfırlandı!")
             st.rerun()
         else:
@@ -492,7 +476,6 @@ with tab1:
                             safe_ogrenci_id = int(r["ogrenci_id"])
                             target_h_idx = int(son_h_idx) if son_h_idx is not None else 1
                             arama_notu_ekle(safe_ogrenci_id, target_h_idx, sonuc, not_metni, arayan)
-                            st.cache_data.clear()
                             st.success("Not başarıyla eklendi!")
                             st.rerun()
                         except Exception as e:
@@ -521,11 +504,8 @@ with tab5:
     st.subheader("🗂️ Tüm Arama Geçmişi")
     if not df_aramalar.empty:
         birlesik = df_aramalar.merge(df_ogrenciler, on="ogrenci_id", how="left")
-        
-        # 1. Kayıt Zamanını Formatlama (GG.AA.YYYY SS:DK)
         birlesik["kayit_zamani"] = pd.to_datetime(birlesik["kayit_zamani"]).dt.strftime("%d.%m.%Y %H:%M")
         
-        # 2. Gösterilecek Sütunların Düzenli ve Türkçe İsmi
         sutun_haritasi = {
             "kayit_zamani": "Kayıt Tarihi",
             "hafta_index": "Hafta",
