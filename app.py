@@ -1,13 +1,14 @@
 """
 tuyun_momentum_app.py
 -----------------------
-Tuyun Akademi - Tuyun Momentum Sistemi (Dinamik Deneme Sayısı Sürümü)
+Tuyun Akademi - Tuyun Momentum Sistemi (Sabit SHA-256 ID & Dinamik Deneme Sayısı Sürümü)
 """
 
 import psycopg2
 from datetime import datetime
 import pandas as pd
 import streamlit as st
+import hashlib
 
 # ===================================================================
 # 1) SABİTLER
@@ -75,12 +76,17 @@ def normalize_excel(uploaded_file) -> pd.DataFrame:
 
     def parse_id(row):
         val = str(row["Ogrenci_ID"]).split(".")[0].strip()
-        if val in ["0", "nan", "None", "", "None"]:
-            return abs(hash(row["Ad_Soyad"])) % 1000000
+        # DEĞİŞİKLİK 1: Python'ın değişken hash() fonksiyonu yerine Sabit/Kararlı SHA-256 ID üretimi
+        if val in ["0", "nan", "None", "", "null"]:
+            name_clean = str(row["Ad_Soyad"]).strip().lower()
+            hash_val = hashlib.sha256(name_clean.encode('utf-8')).hexdigest()
+            return int(hash_val[:8], 16) % 1000000
         try:
             return int(val)
         except:
-            return abs(hash(row["Ad_Soyad"])) % 1000000
+            name_clean = str(row["Ad_Soyad"]).strip().lower()
+            hash_val = hashlib.sha256(name_clean.encode('utf-8')).hexdigest()
+            return int(hash_val[:8], 16) % 1000000
 
     df["Ogrenci_ID"] = df.apply(parse_id, axis=1)
 
@@ -156,7 +162,19 @@ def init_db() -> None:
 
 def ogrencileri_kaydet(conn, df_ogrenci: pd.DataFrame) -> None:
     with conn.cursor() as cur:
+        # DEĞİŞİKLİK 2A: Veritabanında ismi olan öğrencinin ID'sini koru
+        cur.execute("SELECT ad_soyad, ogrenci_id FROM ogrenciler;")
+        mevcut_ogrenciler = {row[0].strip().lower(): row[1] for row in cur.fetchall()}
+
         for _, r in df_ogrenci.iterrows():
+            ad = str(r["Ad_Soyad"]).strip()
+            ad_key = ad.lower()
+            
+            if ad_key in mevcut_ogrenciler:
+                o_id = mevcut_ogrenciler[ad_key]
+            else:
+                o_id = int(r["Ogrenci_ID"])
+
             cur.execute(
                 """INSERT INTO ogrenciler (ogrenci_id, ad_soyad, telefon, kayit_tarihi)
                    VALUES (%s, %s, %s, %s)
@@ -165,8 +183,8 @@ def ogrencileri_kaydet(conn, df_ogrenci: pd.DataFrame) -> None:
                        telefon=EXCLUDED.telefon,
                        kayit_tarihi=EXCLUDED.kayit_tarihi""",
                 (
-                    int(r["Ogrenci_ID"]),
-                    str(r["Ad_Soyad"]),
+                    o_id,
+                    ad,
                     str(r.get("Telefon", "")),
                     datetime.now().strftime("%Y-%m-%d"),
                 ),
@@ -262,8 +280,15 @@ def cift_excel_islem_ve_yukle(file_cozenler, file_cozmeyenler, ay_adi: str, dene
     ogrencileri_kaydet(conn, df_birlesik)
     h_idx = sonraki_hafta_index()
 
+    # DEĞİŞİKLİK 2B: Deneme kaydı yaparken DB'deki gerçek/sabitleşmiş ID'yi çekip kaydet
     for _, r in df_birlesik.iterrows():
-        deneme_kayit_ekle(conn, int(r["Ogrenci_ID"]), ay_adi, deneme_no, h_idx, r["Durum"])
+        cur = conn.cursor()
+        cur.execute("SELECT ogrenci_id FROM ogrenciler WHERE LOWER(ad_soyad) = %s", (str(r["Ad_Soyad"]).strip().lower(),))
+        fetched = cur.fetchone()
+        real_id = fetched[0] if fetched else int(r["Ogrenci_ID"])
+        cur.close()
+
+        deneme_kayit_ekle(conn, real_id, ay_adi, deneme_no, h_idx, r["Durum"])
 
     conn.commit()
     conn.close()
