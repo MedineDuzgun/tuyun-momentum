@@ -647,7 +647,7 @@ with tab4:
                 st.dataframe(
                     o_aramalar[["Tarih & Saat", "Hafta", "Arayan Kişi", "Sonuç", "Görüşme Notu"]], 
                     use_container_width=True, 
-                    hide_index=True
+                    hide_index=True,
                     height=250
                 )
             else:
