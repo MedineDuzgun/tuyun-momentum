@@ -160,13 +160,13 @@ def ogrencileri_kaydet(conn, df_ogrenci: pd.DataFrame) -> None:
             o_id = mevcut_ogrenciler.get(ad_key, int(r["Ogrenci_ID"]))
             kayit_verileri.append((o_id, ad, str(r.get("Telefon", "")), bugun))
 
+        # kayit_tarihi güncellenmek yerine sadece yeni kayıtta ekleniyor
         query = """
             INSERT INTO ogrenciler (ogrenci_id, ad_soyad, telefon, kayit_tarihi)
             VALUES (%s, %s, %s, %s)
             ON CONFLICT(ogrenci_id) DO UPDATE SET
                 ad_soyad=EXCLUDED.ad_soyad,
-                telefon=EXCLUDED.telefon,
-                kayit_tarihi=EXCLUDED.kayit_tarihi
+                telefon=EXCLUDED.telefon
         """
         execute_batch(cur, query, kayit_verileri)
 
@@ -301,23 +301,32 @@ def ogrenci_metriklerini_hesapla(df_kayitlar: pd.DataFrame) -> pd.DataFrame:
     df["puan"] = df["durum"].map(PUAN_TABLOSU).fillna(0.0)
     temel = df.groupby("ogrenci_id")["puan"].sum().rename("temel_puan")
 
-    momentum_kayitlari = []
+    # Sistemde şu ana kadar hangi aylardan veri yüklendiğini AYLAR sırasına göre bulalım
+    yuklenen_aylar_sirali = [ay for ay in AYLAR if ay in df["ay_adi"].unique()]
     
-    # REVİZE 2 MANTIĞI:
-    # Her ayın toplam deneme sayısı bulunur. Öğrenci o ayki TÜM denemeleri "Vaktinde Çözdü" olarak 
-    # tamamladıysa (en az 1 deneme olması ve firesiz bitirmesi şartıyla) bonus verilir.
-    aylik_toplam_denemeler = df.groupby("ay_adi")["deneme_no"].nunique().to_dict()
+    # Yeni ay girildiğinde önceki aylar kapanmış sayılır. 
+    # Son yüklenen ay aktif aydır, bonusu hesaplanmaz. Kapanan aylar:
+    kapanmis_aylar = yuklenen_aylar_sirali[:-1] if len(yuklenen_aylar_sirali) > 1 else []
+
+    momentum_kayitlari = []
 
     for ogrenci_id, grup in df.groupby("ogrenci_id"):
         toplam_bonus = 0.0
-        for ay, ay_grubu in grup.groupby("ay_adi"):
-            hedef_deneme_sayisi = aylik_toplam_denemeler.get(ay, 0)
-            ogrenci_cozdugu_sayi = len(ay_grubu[ay_grubu["durum"] == "Vaktinde Çözdü"])
+        
+        # Sadece kapanmış (tamamlanmış) ayları kontrol et
+        for ay in kapanmis_aylar:
+            ay_grubu = grup[grup["ay_adi"] == ay]
             
-            # Eğer ayın tüm denemelerini firesiz çözdüyse ay sonu momentum bonusu eklenir
-            if hedef_deneme_sayisi > 0 and ogrenci_cozdugu_sayi == hedef_deneme_sayisi:
+            # O ay sistemde toplam kaç farklı deneme var?
+            o_ayki_toplam_deneme = df[df["ay_adi"] == ay]["deneme_no"].nunique()
+            
+            # Öğrenci o ayki denemelerin kaçını vaktinde çözdü?
+            cozdugu_sayi = len(ay_grubu[ay_grubu["durum"] == "Vaktinde Çözdü"])
+            
+            # Kapanan ayın tüm denemeleri firesiz "Vaktinde Çözdü" ise bonus ver
+            if o_ayki_toplam_deneme > 0 and cozdugu_sayi == o_ayki_toplam_deneme:
                 toplam_bonus += MOMENTUM_BONUS
-                
+
         momentum_kayitlari.append({"ogrenci_id": ogrenci_id, "momentum_bonusu": toplam_bonus})
 
     momentum_df = pd.DataFrame(momentum_kayitlari).set_index("ogrenci_id")["momentum_bonusu"]
