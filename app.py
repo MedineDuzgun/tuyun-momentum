@@ -522,21 +522,20 @@ with tab4:
         if ogrenci_kayitlari.empty:
             st.info("Bu öğrenciye ait deneme kaydı bulunamadı.")
         else:
-            # REVİZE 1 MANTIĞI: Sil Butonu eklendi
-            for idx, r in ogrenci_kayitlari.iterrows():
-                col_ay, col_deneme, col_durum, col_sil = st.columns([2, 2, 3, 1])
-                col_ay.write(f"**Ay:** {r['ay_adi']}")
-                col_deneme.write(f"**Deneme No:** {r['deneme_no']}")
-                col_durum.write(f"**Durum:** {r['durum']}")
-                
-                # Tek bir satırdaki yanlış veya gereksiz çözmedi/çözdü kaydını silme tuşu
-                if col_sil.button("🗑️ Sil", key=f"del_deneme_{r['id']}"):
-                    deneme_kaydi_sil(r['id'])
-                    st.success("Deneme kaydı silindi.")
-                    st.rerun()
-                st.divider()
+            # DÜZELTME: Birikmeyi önlemek için sabit yükseklikli kaydırılabilir kutu
+            with st.container(height=300):
+                for idx, r in ogrenci_kayitlari.iterrows():
+                    col_ay, col_deneme, col_durum, col_sil = st.columns([2, 2, 3, 1])
+                    col_ay.write(f"**Ay:** {r['ay_adi']}")
+                    col_deneme.write(f"**Deneme No:** {r['deneme_no']}")
+                    col_durum.write(f"**Durum:** {r['durum']}")
+                    
+                    if col_sil.button("🗑️ Sil", key=f"del_deneme_{r['id']}"):
+                        deneme_kaydi_sil(r['id'])
+                        st.success("Deneme kaydı silindi.")
+                        st.rerun()
+                    st.divider()
 
-        # REVİZE 3 MANTIĞI: Arama Notları Öğrenci Profiline Taşındı
         st.markdown("### 📞 Bu Öğrenciye Ait Arama Kayıtları (Tarihli)")
         if not df_aramalar.empty:
             o_aramalar = df_aramalar[df_aramalar["ogrenci_id"] == secilen_id].copy()
