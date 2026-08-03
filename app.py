@@ -522,16 +522,31 @@ with tab4:
         if ogrenci_kayitlari.empty:
             st.info("Bu öğrenciye ait deneme kaydı bulunamadı.")
         else:
-            # Ayları takvim sırasına (Ocak->Aralık) ve deneme numarasına göre sıralama
-            ogrenci_kayitlari["ay_sira"] = ogrenci_kayitlari["ay_adi"].apply(lambda x: AYLAR.index(x) if x in AYLAR else 99)
-            ogrenci_kayitlari = ogrenci_kayitlari.sort_values(by=["ay_sira", "deneme_no"])
+            # 1. Öğrencinin kaydı olan mevcut ayları bulup takvim sırasına dizelim
+            mevcut_aylar = [ay for ay in AYLAR if ay in ogrenci_kayitlari["ay_adi"].unique()]
+            ay_filtre_secenekleri = ["Tüm Aylar"] + mevcut_aylar
+            
+            # 2. Ay Seçim Filtresi
+            secilen_ay = st.selectbox("📅 İncelemek İstediğiniz Ayı Seçin", ay_filtre_secenekleri)
+            
+            # 3. Seçilen aya göre filtreleme yap
+            if secilen_ay != "Tüm Aylar":
+                filtreli_kayitlar = ogrenci_kayitlari[ogrenci_kayitlari["ay_adi"] == secilen_ay].copy()
+            else:
+                filtreli_kayitlar = ogrenci_kayitlari.copy()
+            
+            # Kronolojik sıralama (Ay ve Deneme No'ya göre)
+            filtreli_kayitlar["ay_sira"] = filtreli_kayitlar["ay_adi"].apply(lambda x: AYLAR.index(x) if x in AYLAR else 99)
+            filtreli_kayitlar = filtreli_kayitlar.sort_values(by=["ay_sira", "deneme_no"])
 
-            # Hem sayfa uzamasını engellemek için kaydırılabilir kutu hem de aylara göre gruplama
-            with st.container(height=320):
-                for ay_adi, grup in ogrenci_kayitlari.groupby("ay_adi", sort=False):
-                    st.markdown(f"#### 📅 {ay_adi}")
-                    for idx, r in grup.iterrows():
-                        col_deneme, col_durum, col_sil = st.columns([3, 4, 1])
+            # 4. Liste Görünümü
+            if filtreli_kayitlar.empty:
+                st.warning(f"{secilen_ay} ayına ait deneme kaydı yok.")
+            else:
+                with st.container(height=300):
+                    for idx, r in filtreli_kayitlar.iterrows():
+                        col_ay, col_deneme, col_durum, col_sil = st.columns([2, 2, 3, 1])
+                        col_ay.write(f"**Ay:** {r['ay_adi']}")
                         col_deneme.write(f"**Deneme No:** {r['deneme_no']}")
                         col_durum.write(f"**Durum:** {r['durum']}")
                         
@@ -539,7 +554,7 @@ with tab4:
                             deneme_kaydi_sil(r['id'])
                             st.success("Deneme kaydı silindi.")
                             st.rerun()
-                    st.divider()
+                        st.divider()
 
         st.markdown("### 📞 Bu Öğrenciye Ait Arama Kayıtları (Tarihli)")
         if not df_aramalar.empty:
