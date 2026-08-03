@@ -522,40 +522,42 @@ with tab4:
         if ogrenci_kayitlari.empty:
             st.info("Bu öğrenciye ait deneme kaydı bulunamadı.")
         else:
-            # 1. Öğrencinin kaydı olan mevcut ayları bulup takvim sırasına dizelim
+            # 1. Mevcut ayları takvim sırasına göre bulalım
             mevcut_aylar = [ay for ay in AYLAR if ay in ogrenci_kayitlari["ay_adi"].unique()]
             ay_filtre_secenekleri = ["Tüm Aylar"] + mevcut_aylar
             
             # 2. Ay Seçim Filtresi
             secilen_ay = st.selectbox("📅 İncelemek İstediğiniz Ayı Seçin", ay_filtre_secenekleri)
             
-            # 3. Seçilen aya göre filtreleme yap
+            # 3. Seçilen aya göre filtreleme
             if secilen_ay != "Tüm Aylar":
                 filtreli_kayitlar = ogrenci_kayitlari[ogrenci_kayitlari["ay_adi"] == secilen_ay].copy()
             else:
                 filtreli_kayitlar = ogrenci_kayitlari.copy()
             
-            # Kronolojik sıralama (Ay ve Deneme No'ya göre)
+            # Kronolojik sıralama
             filtreli_kayitlar["ay_sira"] = filtreli_kayitlar["ay_adi"].apply(lambda x: AYLAR.index(x) if x in AYLAR else 99)
             filtreli_kayitlar = filtreli_kayitlar.sort_values(by=["ay_sira", "deneme_no"])
 
-            # 4. Liste Görünümü
+            # 4. Daraltılmış Liste Görünümü
             if filtreli_kayitlar.empty:
                 st.warning(f"{secilen_ay} ayına ait deneme kaydı yok.")
             else:
-                with st.container(height=300):
+                # Yüksekliği 350px yaptık, aralıklar daraldığı için çok daha fazla kayıt sığacaktır
+                with st.container(height=350):
                     for idx, r in filtreli_kayitlar.iterrows():
-                        col_ay, col_deneme, col_durum, col_sil = st.columns([2, 2, 3, 1])
-                        col_ay.write(f"**Ay:** {r['ay_adi']}")
-                        col_deneme.write(f"**Deneme No:** {r['deneme_no']}")
-                        col_durum.write(f"**Durum:** {r['durum']}")
+                        col_ay, col_deneme, col_durum, col_sil = st.columns([2, 2, 3, 1], vertical_alignment="center")
+                        
+                        col_ay.markdown(f"**Ay:** {r['ay_adi']}")
+                        col_deneme.markdown(f"**Deneme No:** {r['deneme_no']}")
+                        col_durum.markdown(f"**Durum:** {r['durum']}")
                         
                         if col_sil.button("🗑️ Sil", key=f"del_deneme_{r['id']}"):
                             deneme_kaydi_sil(r['id'])
                             st.success("Deneme kaydı silindi.")
                             st.rerun()
-                        st.divider()
 
+        st.markdown("---")
         st.markdown("### 📞 Bu Öğrenciye Ait Arama Kayıtları (Tarihli)")
         if not df_aramalar.empty:
             o_aramalar = df_aramalar[df_aramalar["ogrenci_id"] == secilen_id].copy()
