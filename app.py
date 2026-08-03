@@ -517,23 +517,28 @@ with tab4:
         st.write("---")
         st.markdown("### 📝 Deneme Kayıtları")
         
-        ogrenci_kayitlari = df_kayitlar[df_kayitlar["ogrenci_id"] == secilen_id].sort_values("hafta_index")
+        ogrenci_kayitlari = df_kayitlar[df_kayitlar["ogrenci_id"] == secilen_id].copy()
         
         if ogrenci_kayitlari.empty:
             st.info("Bu öğrenciye ait deneme kaydı bulunamadı.")
         else:
-            # DÜZELTME: Birikmeyi önlemek için sabit yükseklikli kaydırılabilir kutu
-            with st.container(height=300):
-                for idx, r in ogrenci_kayitlari.iterrows():
-                    col_ay, col_deneme, col_durum, col_sil = st.columns([2, 2, 3, 1])
-                    col_ay.write(f"**Ay:** {r['ay_adi']}")
-                    col_deneme.write(f"**Deneme No:** {r['deneme_no']}")
-                    col_durum.write(f"**Durum:** {r['durum']}")
-                    
-                    if col_sil.button("🗑️ Sil", key=f"del_deneme_{r['id']}"):
-                        deneme_kaydi_sil(r['id'])
-                        st.success("Deneme kaydı silindi.")
-                        st.rerun()
+            # Ayları takvim sırasına (Ocak->Aralık) ve deneme numarasına göre sıralama
+            ogrenci_kayitlari["ay_sira"] = ogrenci_kayitlari["ay_adi"].apply(lambda x: AYLAR.index(x) if x in AYLAR else 99)
+            ogrenci_kayitlari = ogrenci_kayitlari.sort_values(by=["ay_sira", "deneme_no"])
+
+            # Hem sayfa uzamasını engellemek için kaydırılabilir kutu hem de aylara göre gruplama
+            with st.container(height=320):
+                for ay_adi, grup in ogrenci_kayitlari.groupby("ay_adi", sort=False):
+                    st.markdown(f"#### 📅 {ay_adi}")
+                    for idx, r in grup.iterrows():
+                        col_deneme, col_durum, col_sil = st.columns([3, 4, 1])
+                        col_deneme.write(f"**Deneme No:** {r['deneme_no']}")
+                        col_durum.write(f"**Durum:** {r['durum']}")
+                        
+                        if col_sil.button("🗑️ Sil", key=f"del_deneme_{r['id']}"):
+                            deneme_kaydi_sil(r['id'])
+                            st.success("Deneme kaydı silindi.")
+                            st.rerun()
                     st.divider()
 
         st.markdown("### 📞 Bu Öğrenciye Ait Arama Kayıtları (Tarihli)")
@@ -557,7 +562,6 @@ with tab4:
                 st.info("Bu öğrenci için henüz yapılmış bir arama kaydı yok.")
         else:
             st.info("Sistemde henüz arama kaydı bulunmuyor.")
-
 with tab5:
     st.subheader("🗂️ Tüm Arama Geçmişi")
     if not df_aramalar.empty:
