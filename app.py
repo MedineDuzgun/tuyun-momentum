@@ -648,7 +648,7 @@ with tab4:
                     o_aramalar[["Tarih & Saat", "Hafta", "Arayan Kişi", "Sonuç", "Görüşme Notu"]], 
                     use_container_width=True, 
                     hide_index=True,
-                    height=250
+                    height=350
                 )
             else:
                 st.info("Bu öğrenci için henüz yapılmış bir arama kaydı yok.")
