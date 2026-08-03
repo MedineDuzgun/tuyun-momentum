@@ -1,7 +1,7 @@
 """
 tuyun_momentum_app.py
 -----------------------
-Tuyun Akademi - Tuyun Momentum Sistemi (Sabit SHA-256 ID & Dinamik Deneme Sayısı Sürümü - Hız Optimize Edilmiş)
+Tuyun Akademi - Tuyun Momentum Sistemi (Revize Edilmiş Sürüm)
 """
 
 import psycopg2
@@ -24,7 +24,7 @@ MOMENTUM_BONUS = 0.5
 
 AYLAR = [
     "Ocak", "Şubat", "Mart", "Nisan", "Mayıs", "Haziran",
-    "Temmuz", "Ağustos", "Eylul", "Ekim", "Kasım", "Aralık"
+    "Temmuz", "Ağustos", "Eylül", "Ekim", "Kasım", "Aralık"
 ]
 
 ARAMA_SONUCU_SECENEKLERI = [
@@ -138,17 +138,6 @@ def init_db() -> None:
                         kayit_zamani TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                     );
                 """)
-                
-                cur.execute("ALTER TABLE arama_notlari ADD COLUMN IF NOT EXISTS arayan TEXT;")
-                cur.execute("ALTER TABLE arama_notlari ADD COLUMN IF NOT EXISTS hafta_index INT DEFAULT 1;")
-                cur.execute("ALTER TABLE deneme_kayitlari ADD COLUMN IF NOT EXISTS ay_adi TEXT DEFAULT 'Ocak';")
-                cur.execute("ALTER TABLE deneme_kayitlari ADD COLUMN IF NOT EXISTS deneme_no INT DEFAULT 1;")
-                
-                cur.execute("ALTER TABLE arama_notlari ALTER COLUMN arama_sonucu DROP NOT NULL;")
-                cur.execute("ALTER TABLE arama_notlari ALTER COLUMN hafta_index DROP NOT NULL;")
-                cur.execute("ALTER TABLE arama_notlari ALTER COLUMN not_metni DROP NOT NULL;")
-                cur.execute("ALTER TABLE arama_notlari ALTER COLUMN arayan DROP NOT NULL;")
-                
                 conn.commit()
         except Exception as e:
             conn.rollback()
@@ -179,7 +168,6 @@ def ogrencileri_kaydet(conn, df_ogrenci: pd.DataFrame) -> None:
                 telefon=EXCLUDED.telefon,
                 kayit_tarihi=EXCLUDED.kayit_tarihi
         """
-        # HIZLANDIRMA: Teker teker değil, Toplu (Batch) Insert
         execute_batch(cur, query, kayit_verileri)
 
 def arama_notu_ekle(ogrenci_id: int, hafta_index: int, sonuc: str, not_metni: str, arayan: str) -> None:
@@ -188,12 +176,7 @@ def arama_notu_ekle(ogrenci_id: int, hafta_index: int, sonuc: str, not_metni: st
         try:
             with conn.cursor() as cur:
                 safe_id = int(ogrenci_id) if ogrenci_id is not None else 0
-                
-                try:
-                    safe_h_idx = int(hafta_index) if hafta_index is not None else 1
-                except (ValueError, TypeError):
-                    safe_h_idx = 1
-                
+                safe_h_idx = int(hafta_index) if hafta_index is not None else 1
                 safe_sonuc = str(sonuc).strip() if (sonuc and str(sonuc).strip()) else "Aranmadı"
                 safe_not = str(not_metni).strip() if (not_metni and str(not_metni).strip()) else "Not girilmedi"
                 safe_arayan = str(arayan).strip() if (arayan and str(arayan).strip()) else "Sistem / Belirtilmedi"
@@ -204,15 +187,29 @@ def arama_notu_ekle(ogrenci_id: int, hafta_index: int, sonuc: str, not_metni: st
                     (safe_id, safe_h_idx, safe_sonuc, safe_not, safe_arayan, datetime.now()),
                 )
                 conn.commit()
-                st.cache_data.clear() # Önbelleği temizle
+                st.cache_data.clear()
         except Exception as e:
             conn.rollback()
             st.error(f"Arama notu kaydedilirken hata oluştu: {e}")
         finally:
             conn.close()
 
-# ÖNBELLEK DÜZELTMESİ: ttl koyarak sürekli stale veri kalması önlendi
-@st.cache_data(ttl=60, show_spinner=False)
+# REVİZE 1: Deneme Kaydı Silme Fonksiyonu
+def deneme_kaydi_sil(deneme_id: int) -> None:
+    conn = get_conn()
+    if conn:
+        try:
+            with conn.cursor() as cur:
+                cur.execute("DELETE FROM deneme_kayitlari WHERE id = %s", (deneme_id,))
+                conn.commit()
+                st.cache_data.clear()
+        except Exception as e:
+            conn.rollback()
+            st.error(f"Deneme silinirken hata: {e}")
+        finally:
+            conn.close()
+
+@st.cache_data(ttl=30, show_spinner=False)
 def tum_veriyi_oku():
     conn = get_conn()
     if not conn:
@@ -276,7 +273,6 @@ def cift_excel_islem_ve_yukle(file_cozenler, file_cozmeyenler, ay_adi: str, dene
             hafta_index=EXCLUDED.hafta_index,
             yukleme_zamani=EXCLUDED.yukleme_zamani
     """
-    # HIZLANDIRMA: Teker teker SQL döngüsü yerine toplu execute_batch
     execute_batch(cur, deneme_query, deneme_verileri)
     cur.close()
 
@@ -295,7 +291,7 @@ def veritabanini_sifirla() -> None:
         st.cache_data.clear()
 
 # ===================================================================
-# 4) İŞ MANTIĞI HESAPLAMALARI
+# 4) İŞ MANTIĞI HESAPLAMALARI (REVİZE 2: AY BİTİNCE MOMENTUM)
 # ===================================================================
 def ogrenci_metriklerini_hesapla(df_kayitlar: pd.DataFrame) -> pd.DataFrame:
     if df_kayitlar.empty:
@@ -306,11 +302,22 @@ def ogrenci_metriklerini_hesapla(df_kayitlar: pd.DataFrame) -> pd.DataFrame:
     temel = df.groupby("ogrenci_id")["puan"].sum().rename("temel_puan")
 
     momentum_kayitlari = []
+    
+    # REVİZE 2 MANTIĞI:
+    # Her ayın toplam deneme sayısı bulunur. Öğrenci o ayki TÜM denemeleri "Vaktinde Çözdü" olarak 
+    # tamamladıysa (en az 1 deneme olması ve firesiz bitirmesi şartıyla) bonus verilir.
+    aylik_toplam_denemeler = df.groupby("ay_adi")["deneme_no"].nunique().to_dict()
+
     for ogrenci_id, grup in df.groupby("ogrenci_id"):
         toplam_bonus = 0.0
         for ay, ay_grubu in grup.groupby("ay_adi"):
-            if len(ay_grubu) >= 4 and all(ay_grubu["durum"] == "Vaktinde Çözdü"):
+            hedef_deneme_sayisi = aylik_toplam_denemeler.get(ay, 0)
+            ogrenci_cozdugu_sayi = len(ay_grubu[ay_grubu["durum"] == "Vaktinde Çözdü"])
+            
+            # Eğer ayın tüm denemelerini firesiz çözdüyse ay sonu momentum bonusu eklenir
+            if hedef_deneme_sayisi > 0 and ogrenci_cozdugu_sayi == hedef_deneme_sayisi:
                 toplam_bonus += MOMENTUM_BONUS
+                
         momentum_kayitlari.append({"ogrenci_id": ogrenci_id, "momentum_bonusu": toplam_bonus})
 
     momentum_df = pd.DataFrame(momentum_kayitlari).set_index("ogrenci_id")["momentum_bonusu"]
@@ -453,7 +460,7 @@ col4.metric("Arama Listesi", len(arama_listesi), delta_color="inverse")
 
 st.divider()
 
-tab1, tab2, tab3, tab4, tab5 = st.tabs(["📞 Arama Listesi", "🏆 Scoreboard", "🤖 AI Analist Raporu", "📈 Öğrenci Geçmişi", "🗂️ Arama Geçmişi"])
+tab1, tab2, tab3, tab4, tab5 = st.tabs(["📞 Arama Listesi", "🏆 Scoreboard", "🤖 AI Analist Raporu", "📈 Öğrenci Profil & Geçmişi", "🗂️ Tüm Arama Geçmişi"])
 
 with tab1:
     st.subheader("Operasyonel Arama Listesi (2 Hafta Üst Üste Çözmeyenler)")
@@ -492,13 +499,56 @@ with tab3:
     st.write(genel_yorum_uret(avg_puan))
 
 with tab4:
-    st.subheader("📈 Öğrenci Geçmişi")
+    st.subheader("👤 Öğrenci Profili ve Detaylı Geçmişi")
     secim_listesi = df_ogrenciler.apply(lambda r: f"{r['ad_soyad']} (ID {r['ogrenci_id']})", axis=1).tolist()
     if secim_listesi:
         secilen = st.selectbox("Öğrenci Seçin", secim_listesi)
         secilen_id = int(secilen.split("ID ")[1].rstrip(")"))
+        
+        st.write("---")
+        st.markdown("### 📝 Deneme Kayıtları")
+        
         ogrenci_kayitlari = df_kayitlar[df_kayitlar["ogrenci_id"] == secilen_id].sort_values("hafta_index")
-        st.dataframe(ogrenci_kayitlari[["ay_adi", "deneme_no", "durum"]], use_container_width=True, hide_index=True)
+        
+        if ogrenci_kayitlari.empty:
+            st.info("Bu öğrenciye ait deneme kaydı bulunamadı.")
+        else:
+            # REVİZE 1 MANTIĞI: Sil Butonu eklendi
+            for idx, r in ogrenci_kayitlari.iterrows():
+                col_ay, col_deneme, col_durum, col_sil = st.columns([2, 2, 3, 1])
+                col_ay.write(f"**Ay:** {r['ay_adi']}")
+                col_deneme.write(f"**Deneme No:** {r['deneme_no']}")
+                col_durum.write(f"**Durum:** {r['durum']}")
+                
+                # Tek bir satırdaki yanlış veya gereksiz çözmedi/çözdü kaydını silme tuşu
+                if col_sil.button("🗑️ Sil", key=f"del_deneme_{r['id']}"):
+                    deneme_kaydi_sil(r['id'])
+                    st.success("Deneme kaydı silindi.")
+                    st.rerun()
+                st.divider()
+
+        # REVİZE 3 MANTIĞI: Arama Notları Öğrenci Profiline Taşındı
+        st.markdown("### 📞 Bu Öğrenciye Ait Arama Kayıtları (Tarihli)")
+        if not df_aramalar.empty:
+            o_aramalar = df_aramalar[df_aramalar["ogrenci_id"] == secilen_id].copy()
+            if not o_aramalar.empty:
+                o_aramalar["kayit_zamani"] = pd.to_datetime(o_aramalar["kayit_zamani"]).dt.strftime("%d.%m.%Y %H:%M")
+                o_aramalar = o_aramalar.rename(columns={
+                    "kayit_zamani": "Tarih & Saat",
+                    "hafta_index": "Hafta",
+                    "arayan": "Arayan Kişi",
+                    "arama_sonucu": "Sonuç",
+                    "not_metni": "Görüşme Notu"
+                })
+                st.dataframe(
+                    o_aramalar[["Tarih & Saat", "Hafta", "Arayan Kişi", "Sonuç", "Görüşme Notu"]], 
+                    use_container_width=True, 
+                    hide_index=True
+                )
+            else:
+                st.info("Bu öğrenci için henüz yapılmış bir arama kaydı yok.")
+        else:
+            st.info("Sistemde henüz arama kaydı bulunmuyor.")
 
 with tab5:
     st.subheader("🗂️ Tüm Arama Geçmişi")
