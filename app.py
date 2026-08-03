@@ -1,7 +1,7 @@
 """
 tuyun_momentum_app.py
 -----------------------
-Tuyun Akademi - Tuyun Momentum Sistemi (Revize Edilmiş Sürüm)
+Tuyun Akademi - Tuyun Momentum Sistemi (Nihai Revize Sürüm)
 """
 
 import psycopg2
@@ -10,6 +10,8 @@ from datetime import datetime
 import pandas as pd
 import streamlit as st
 import hashlib
+import io
+import urllib.parse
 
 # ===================================================================
 # 1) SABİTLER
@@ -160,7 +162,6 @@ def ogrencileri_kaydet(conn, df_ogrenci: pd.DataFrame) -> None:
             o_id = mevcut_ogrenciler.get(ad_key, int(r["Ogrenci_ID"]))
             kayit_verileri.append((o_id, ad, str(r.get("Telefon", "")), bugun))
 
-        # kayit_tarihi güncellenmek yerine sadece yeni kayıtta ekleniyor
         query = """
             INSERT INTO ogrenciler (ogrenci_id, ad_soyad, telefon, kayit_tarihi)
             VALUES (%s, %s, %s, %s)
@@ -194,7 +195,6 @@ def arama_notu_ekle(ogrenci_id: int, hafta_index: int, sonuc: str, not_metni: st
         finally:
             conn.close()
 
-# REVİZE 1: Deneme Kaydı Silme Fonksiyonu
 def deneme_kaydi_sil(deneme_id: int) -> None:
     conn = get_conn()
     if conn:
@@ -291,7 +291,7 @@ def veritabanini_sifirla() -> None:
         st.cache_data.clear()
 
 # ===================================================================
-# 4) İŞ MANTIĞI HESAPLAMALARI (REVİZE 2: AY BİTİNCE MOMENTUM)
+# 4) İŞ MANTIĞI HESAPLAMALARI
 # ===================================================================
 def ogrenci_metriklerini_hesapla(df_kayitlar: pd.DataFrame) -> pd.DataFrame:
     if df_kayitlar.empty:
@@ -301,11 +301,7 @@ def ogrenci_metriklerini_hesapla(df_kayitlar: pd.DataFrame) -> pd.DataFrame:
     df["puan"] = df["durum"].map(PUAN_TABLOSU).fillna(0.0)
     temel = df.groupby("ogrenci_id")["puan"].sum().rename("temel_puan")
 
-    # Sistemde şu ana kadar hangi aylardan veri yüklendiğini AYLAR sırasına göre bulalım
     yuklenen_aylar_sirali = [ay for ay in AYLAR if ay in df["ay_adi"].unique()]
-    
-    # Yeni ay girildiğinde önceki aylar kapanmış sayılır. 
-    # Son yüklenen ay aktif aydır, bonusu hesaplanmaz. Kapanan aylar:
     kapanmis_aylar = yuklenen_aylar_sirali[:-1] if len(yuklenen_aylar_sirali) > 1 else []
 
     momentum_kayitlari = []
@@ -313,17 +309,11 @@ def ogrenci_metriklerini_hesapla(df_kayitlar: pd.DataFrame) -> pd.DataFrame:
     for ogrenci_id, grup in df.groupby("ogrenci_id"):
         toplam_bonus = 0.0
         
-        # Sadece kapanmış (tamamlanmış) ayları kontrol et
         for ay in kapanmis_aylar:
             ay_grubu = grup[grup["ay_adi"] == ay]
-            
-            # O ay sistemde toplam kaç farklı deneme var?
             o_ayki_toplam_deneme = df[df["ay_adi"] == ay]["deneme_no"].nunique()
-            
-            # Öğrenci o ayki denemelerin kaçını vaktinde çözdü?
             cozdugu_sayi = len(ay_grubu[ay_grubu["durum"] == "Vaktinde Çözdü"])
             
-            # Kapanan ayın tüm denemeleri firesiz "Vaktinde Çözdü" ise bonus ver
             if o_ayki_toplam_deneme > 0 and cozdugu_sayi == o_ayki_toplam_deneme:
                 toplam_bonus += MOMENTUM_BONUS
 
@@ -469,19 +459,63 @@ col4.metric("Arama Listesi", len(arama_listesi), delta_color="inverse")
 
 st.divider()
 
-tab1, tab2, tab3, tab4, tab5 = st.tabs(["📞 Arama Listesi", "🏆 Scoreboard", "🤖 AI Analist Raporu", "📈 Öğrenci Profil & Geçmişi", "🗂️ Tüm Arama Geçmişi"])
+tab1, tab2, tab3, tab4, tab5 = st.tabs([
+    "📞 Arama Listesi", 
+    "🏆 Scoreboard", 
+    "🤖 AI Analist Raporu", 
+    "📈 Öğrenci Profil & Geçmişi", 
+    "🗂️ Tüm Arama Geçmişi"
+])
 
+# ===================================================================
+# TAB 1: ARAMA LİSTESİ
+# ===================================================================
 with tab1:
     st.subheader("Operasyonel Arama Listesi (2 Hafta Üst Üste Çözmeyenler)")
+    
     if arama_listesi.empty:
         st.success("Risk altında öğrenci yok. ✅")
     else:
+        # İndirme Butonları Tab1 İÇİNE Taşındı
+        col_csv, col_excel = st.columns(2)
+        with col_csv:
+            csv_data = arama_listesi.to_csv(index=False).encode('utf-8-sig')
+            st.download_button(
+                label="📄 CSV Olarak İndir",
+                data=csv_data,
+                file_name=f"arama_listesi_hafta_{son_h_idx}.csv",
+                mime="text/csv",
+                use_container_width=True
+            )
+        with col_excel:
+            buffer = io.BytesIO()
+            with pd.ExcelWriter(buffer, engine='openpyxl') as writer:
+                arama_listesi.to_excel(writer, index=False, sheet_name='Arama Listesi')
+            st.download_button(
+                label="📊 Excel (.xlsx) Olarak İndir",
+                data=buffer.getvalue(),
+                file_name=f"arama_listesi_hafta_{son_h_idx}.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                use_container_width=True
+            )
+
+        st.write("")
         goster = arama_listesi[["ogrenci_id", "ad_soyad", "telefon", "onceki_durum", "son_durum"]]
         st.dataframe(goster, use_container_width=True, hide_index=True)
 
         for _, r in arama_listesi.iterrows():
             with st.expander(f"{r['ad_soyad']} (ID {r['ogrenci_id']})"):
-                st.text_area("WhatsApp Mesajı", value=whatsapp_mesaji_olustur(r["ad_soyad"]), height=100, key=f"msg_{r['ogrenci_id']}")
+                msg_text = whatsapp_mesaji_olustur(r["ad_soyad"])
+                st.text_area("WhatsApp Mesajı", value=msg_text, height=100, key=f"msg_{r['ogrenci_id']}")
+                
+                # WhatsApp Direkt Yönlendirme Linki
+                tel_clean = str(r.get("telefon", "")).replace(" ", "").replace("-", "").replace("(", "").replace(")", "")
+                if tel_clean:
+                    if not tel_clean.startswith("90") and len(tel_clean) == 10:
+                        tel_clean = "90" + tel_clean
+                    wa_url = f"https://wa.me/{tel_clean}?text={urllib.parse.quote(msg_text)}"
+                    st.link_button("💬 WhatsApp'tan Mesaj Gönder", wa_url)
+
                 with st.form(key=f"form_{r['ogrenci_id']}"):
                     sonuc = st.selectbox("Sonuç", ARAMA_SONUCU_SECENEKLERI, key=f"res_{r['ogrenci_id']}")
                     not_metni = st.text_area("Not", key=f"note_{r['ogrenci_id']}")
@@ -497,16 +531,62 @@ with tab1:
                         except Exception as e:
                             st.error(f"Form kaydı hatası: {e}")
 
+# ===================================================================
+# TAB 2: SCOREBOARD
+# ===================================================================
 with tab2:
     st.subheader("Scoreboard (Kümülatif)")
     siralanmis = metrikler.sort_values("toplam_puan", ascending=False).reset_index(drop=True)
-    st.dataframe(siralanmis[["ogrenci_id", "ad_soyad", "temel_puan", "momentum_bonusu", "toplam_puan"]], use_container_width=True, hide_index=True)
+    
+    # Arama Kutusu
+    arama_kw = st.text_input("🔍 Öğrenci Ara (İsim veya ID)", placeholder="Örn: İlkay veya 505658")
+    if arama_kw:
+        siralanmis = siralanmis[
+            siralanmis["ad_soyad"].str.contains(arama_kw, case=False, na=False) |
+            siralanmis["ogrenci_id"].astype(str).str.contains(arama_kw, na=False)
+        ]
 
+    st.dataframe(
+        siralanmis[["ogrenci_id", "ad_soyad", "temel_puan", "momentum_bonusu", "toplam_puan"]], 
+        use_container_width=True, 
+        hide_index=True
+    )
+
+    # Scoreboard İndirme Butonları
+    st.write("")
+    col_sb_csv, col_sb_excel = st.columns(2)
+    with col_sb_csv:
+        csv_sb = siralanmis.to_csv(index=False).encode('utf-8-sig')
+        st.download_button(
+            label="📄 Scoreboard'u CSV İndir",
+            data=csv_sb,
+            file_name="scoreboard_tum_liste.csv",
+            mime="text/csv",
+            use_container_width=True
+        )
+    with col_sb_excel:
+        buffer_sb = io.BytesIO()
+        with pd.ExcelWriter(buffer_sb, engine='openpyxl') as writer:
+            siralanmis.to_excel(writer, index=False, sheet_name='Scoreboard')
+        st.download_button(
+            label="📊 Scoreboard'u Excel İndir",
+            data=buffer_sb.getvalue(),
+            file_name="scoreboard_tum_liste.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            use_container_width=True
+        )
+
+# ===================================================================
+# TAB 3: AI ANALİST RAPORU
+# ===================================================================
 with tab3:
     st.subheader("🤖 AI Analist Raporu")
     avg_puan = metrikler["toplam_puan"].mean() if not metrikler.empty else 0
     st.write(genel_yorum_uret(avg_puan))
 
+# ===================================================================
+# TAB 4: ÖĞRENCİ PROFİL VE GEÇMİŞİ
+# ===================================================================
 with tab4:
     st.subheader("👤 Öğrenci Profili ve Detaylı Geçmişi")
     secim_listesi = df_ogrenciler.apply(lambda r: f"{r['ad_soyad']} (ID {r['ogrenci_id']})", axis=1).tolist()
@@ -522,28 +602,22 @@ with tab4:
         if ogrenci_kayitlari.empty:
             st.info("Bu öğrenciye ait deneme kaydı bulunamadı.")
         else:
-            # 1. Mevcut ayları takvim sırasına göre bulalım
             mevcut_aylar = [ay for ay in AYLAR if ay in ogrenci_kayitlari["ay_adi"].unique()]
             ay_filtre_secenekleri = ["Tüm Aylar"] + mevcut_aylar
             
-            # 2. Ay Seçim Filtresi
-            secilen_ay = st.selectbox("📅 İncelemek İstediğiniz Ayı Seçin", ay_filtre_secenekleri)
+            secilen_ay_f = st.selectbox("📅 İncelemek İstediğiniz Ayı Seçin", ay_filtre_secenekleri)
             
-            # 3. Seçilen aya göre filtreleme
-            if secilen_ay != "Tüm Aylar":
-                filtreli_kayitlar = ogrenci_kayitlari[ogrenci_kayitlari["ay_adi"] == secilen_ay].copy()
+            if secilen_ay_f != "Tüm Aylar":
+                filtreli_kayitlar = ogrenci_kayitlari[ogrenci_kayitlari["ay_adi"] == secilen_ay_f].copy()
             else:
                 filtreli_kayitlar = ogrenci_kayitlari.copy()
             
-            # Kronolojik sıralama
             filtreli_kayitlar["ay_sira"] = filtreli_kayitlar["ay_adi"].apply(lambda x: AYLAR.index(x) if x in AYLAR else 99)
             filtreli_kayitlar = filtreli_kayitlar.sort_values(by=["ay_sira", "deneme_no"])
 
-            # 4. Daraltılmış Liste Görünümü
             if filtreli_kayitlar.empty:
-                st.warning(f"{secilen_ay} ayına ait deneme kaydı yok.")
+                st.warning(f"{secilen_ay_f} ayına ait deneme kaydı yok.")
             else:
-                # Yüksekliği 350px yaptık, aralıklar daraldığı için çok daha fazla kayıt sığacaktır
                 with st.container(height=350):
                     for idx, r in filtreli_kayitlar.iterrows():
                         col_ay, col_deneme, col_durum, col_sil = st.columns([2, 2, 3, 1], vertical_alignment="center")
@@ -579,6 +653,10 @@ with tab4:
                 st.info("Bu öğrenci için henüz yapılmış bir arama kaydı yok.")
         else:
             st.info("Sistemde henüz arama kaydı bulunmuyor.")
+
+# ===================================================================
+# TAB 5: TÜM ARAMA GEÇMİŞİ
+# ===================================================================
 with tab5:
     st.subheader("🗂️ Tüm Arama Geçmişi")
     if not df_aramalar.empty:
