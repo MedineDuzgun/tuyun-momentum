@@ -1,7 +1,7 @@
 """
 tuyun_momentum_app.py
 -----------------------
-Tuyun Akademi - Tuyun Momentum Sistemi (Nihai Revize Sürüm)
+Tuyun Akademi - Tuyun Momentum Sistemi (Ay Sonu Bonus Güncellenmiş Sürüm)
 """
 
 import psycopg2
@@ -126,10 +126,14 @@ def init_db() -> None:
                         deneme_no INT NOT NULL,
                         hafta_index INT NOT NULL,
                         durum TEXT NOT NULL,
+                        is_ay_sonu BOOLEAN DEFAULT FALSE,
                         yukleme_zamani TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                         UNIQUE(ogrenci_id, ay_adi, deneme_no)
                     );
                     
+                    -- Varolan veritabanında is_ay_sonu sütunu yoksa ekle
+                    ALTER TABLE deneme_kayitlari ADD COLUMN IF NOT EXISTS is_ay_sonu BOOLEAN DEFAULT FALSE;
+
                     CREATE TABLE IF NOT EXISTS arama_notlari (
                         id SERIAL PRIMARY KEY,
                         ogrenci_id BIGINT NOT NULL REFERENCES ogrenciler(ogrenci_id) ON DELETE CASCADE,
@@ -230,7 +234,7 @@ def sonraki_hafta_index() -> int:
     conn.close()
     return int(sonuc) + 1 if sonuc is not None else 1
 
-def cift_excel_islem_ve_yukle(file_cozenler, file_cozmeyenler, ay_adi: str, deneme_no: int) -> int:
+def cift_excel_islem_ve_yukle(file_cozenler, file_cozmeyenler, ay_adi: str, deneme_no: int, is_ay_sonu: bool) -> int:
     conn = get_conn()
     if not conn:
         return 0
@@ -256,6 +260,10 @@ def cift_excel_islem_ve_yukle(file_cozenler, file_cozmeyenler, ay_adi: str, dene
     cur.execute("SELECT LOWER(ad_soyad), ogrenci_id FROM ogrenciler")
     id_map = {row[0]: row[1] for row in cur.fetchall()}
 
+    # Eğer ayın son denemesi olarak işaretlendiyse, aynı ayın önceki denemelerini de güncelleyebiliriz
+    if is_ay_sonu:
+        cur.execute("UPDATE deneme_kayitlari SET is_ay_sonu = TRUE WHERE ay_adi = %s", (ay_adi,))
+
     deneme_verileri = []
     zaman_simdi = datetime.now()
 
@@ -263,14 +271,15 @@ def cift_excel_islem_ve_yukle(file_cozenler, file_cozmeyenler, ay_adi: str, dene
         ad_clean = str(r["Ad_Soyad"]).strip().lower()
         real_id = id_map.get(ad_clean, int(r["Ogrenci_ID"]))
         durum_val = str(r["Durum"]).strip() if r["Durum"] else "Muaf"
-        deneme_verileri.append((real_id, ay_adi, int(deneme_no), int(h_idx), durum_val, zaman_simdi))
+        deneme_verileri.append((real_id, ay_adi, int(deneme_no), int(h_idx), durum_val, is_ay_sonu, zaman_simdi))
 
     deneme_query = """
-        INSERT INTO deneme_kayitlari (ogrenci_id, ay_adi, deneme_no, hafta_index, durum, yukleme_zamani)
-        VALUES (%s, %s, %s, %s, %s, %s)
+        INSERT INTO deneme_kayitlari (ogrenci_id, ay_adi, deneme_no, hafta_index, durum, is_ay_sonu, yukleme_zamani)
+        VALUES (%s, %s, %s, %s, %s, %s, %s)
         ON CONFLICT(ogrenci_id, ay_adi, deneme_no) DO UPDATE SET
             durum=EXCLUDED.durum,
             hafta_index=EXCLUDED.hafta_index,
+            is_ay_sonu=EXCLUDED.is_ay_sonu,
             yukleme_zamani=EXCLUDED.yukleme_zamani
     """
     execute_batch(cur, deneme_query, deneme_verileri)
@@ -301,8 +310,11 @@ def ogrenci_metriklerini_hesapla(df_kayitlar: pd.DataFrame) -> pd.DataFrame:
     df["puan"] = df["durum"].map(PUAN_TABLOSU).fillna(0.0)
     temel = df.groupby("ogrenci_id")["puan"].sum().rename("temel_puan")
 
-    yuklenen_aylar_sirali = [ay for ay in AYLAR if ay in df["ay_adi"].unique()]
-    kapanmis_aylar = yuklenen_aylar_sirali[:-1] if len(yuklenen_aylar_sirali) > 1 else []
+    # Ay sonu olarak işaretlenmiş ayların tespiti
+    if "is_ay_sonu" in df.columns:
+        kapanmis_aylar = df[df["is_ay_sonu"] == True]["ay_adi"].unique().tolist()
+    else:
+        kapanmis_aylar = []
 
     momentum_kayitlari = []
 
@@ -314,6 +326,7 @@ def ogrenci_metriklerini_hesapla(df_kayitlar: pd.DataFrame) -> pd.DataFrame:
             o_ayki_toplam_deneme = df[df["ay_adi"] == ay]["deneme_no"].nunique()
             cozdugu_sayi = len(ay_grubu[ay_grubu["durum"] == "Vaktinde Çözdü"])
             
+            # Eğer ay kapandıysa ve öğrenci o ayın tüm denemelerini Vaktinde Çözdüyse bonus alır
             if o_ayki_toplam_deneme > 0 and cozdugu_sayi == o_ayki_toplam_deneme:
                 toplam_bonus += MOMENTUM_BONUS
 
@@ -413,12 +426,15 @@ with st.sidebar:
 
     secilen_ay = st.selectbox("Hangi Ay?", options=AYLAR)
     deneme_no = st.number_input("Ayın Kaçıncı Denemesi?", min_value=1, max_value=20, value=1, step=1)
+    
+    # --- YENİ EKLENEN REVIZE KISMI ---
+    is_ay_sonu = st.checkbox("🏁 Bu deneme, bu ayın son denemesi mi?", help="İşaretlenirse bu ay tamamlanmış kabul edilir ve tam çözenlere +0.5 Momentum Bonusu eklenir.")
 
     if st.button("✅ İki Listeyi İşle ve Kaydet", type="primary"):
         if file_cozenler is None and file_cozmeyenler is None:
             st.error("Lütfen en az bir Excel dosyası yükleyin.")
         else:
-            toplam_kayit = cift_excel_islem_ve_yukle(file_cozenler, file_cozmeyenler, secilen_ay, int(deneme_no))
+            toplam_kayit = cift_excel_islem_ve_yukle(file_cozenler, file_cozmeyenler, secilen_ay, int(deneme_no), is_ay_sonu)
             st.success(f"{secilen_ay} Ayı - Deneme {deneme_no}: Toplam {toplam_kayit} öğrenci verisi işlendi.")
             st.rerun()
 
@@ -476,7 +492,6 @@ with tab1:
     if arama_listesi.empty:
         st.success("Risk altında öğrenci yok. ✅")
     else:
-        # İndirme Butonları Tab1 İÇİNE Taşındı
         col_csv, col_excel = st.columns(2)
         with col_csv:
             csv_data = arama_listesi.to_csv(index=False).encode('utf-8-sig')
@@ -508,7 +523,6 @@ with tab1:
                 msg_text = whatsapp_mesaji_olustur(r["ad_soyad"])
                 st.text_area("WhatsApp Mesajı", value=msg_text, height=100, key=f"msg_{r['ogrenci_id']}")
                 
-                # WhatsApp Direkt Yönlendirme Linki
                 tel_clean = str(r.get("telefon", "")).replace(" ", "").replace("-", "").replace("(", "").replace(")", "")
                 if tel_clean:
                     if not tel_clean.startswith("90") and len(tel_clean) == 10:
@@ -538,7 +552,6 @@ with tab2:
     st.subheader("Scoreboard (Kümülatif)")
     siralanmis = metrikler.sort_values("toplam_puan", ascending=False).reset_index(drop=True)
     
-    # Arama Kutusu
     arama_kw = st.text_input("🔍 Öğrenci Ara (İsim veya ID)", placeholder="Örn: İlkay veya 505658")
     if arama_kw:
         siralanmis = siralanmis[
@@ -552,7 +565,6 @@ with tab2:
         hide_index=True
     )
 
-    # Scoreboard İndirme Butonları
     st.write("")
     col_sb_csv, col_sb_excel = st.columns(2)
     with col_sb_csv:
@@ -648,7 +660,7 @@ with tab4:
                     o_aramalar[["Tarih & Saat", "Hafta", "Arayan Kişi", "Sonuç", "Görüşme Notu"]], 
                     use_container_width=True, 
                     hide_index=True,
-                    height=350
+                    height=250
                 )
             else:
                 st.info("Bu öğrenci için henüz yapılmış bir arama kaydı yok.")
