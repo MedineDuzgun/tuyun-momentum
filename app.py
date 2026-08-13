@@ -1,440 +1,213 @@
-"""
-tuyun_momentum_app.py
------------------------
-Tuyun Akademi - Tuyun Momentum Sistemi
-"""
-
-import sqlite3
+%%writefile app.py
 from datetime import datetime
-from pathlib import Path
 import pandas as pd
 import streamlit as st
 
-# ===================================================================
-# 1) SABİTLER
-# ===================================================================
-DB_PATH = Path(__file__).parent / "tuyun_momentum.db"
+# Modüllerden içe aktarmalar
+from db_operations import (
+    init_db,
+    get_conn,
+    ogrencileri_kaydet,
+    arama_notu_ekle,
+    tum_veriyi_oku,
+    veritabanini_sifirla,
+)
+from utils import (
+    PUAN_TABLOSU,
+    AYLAR,
+    SINIF_SEVIYELERI,
+    ARAMA_SONUCU_SECENEKLERI,
+    normalize_excel_pair,
+    ogrenci_metriklerini_hesapla,
+    arama_listesi_hesapla,
+    whatsapp_mesaji_olustur,
+)
 
-PUAN_TABLOSU = {
-    "Vaktinde Çözdü": 1.0,
-    "Geç Çözdü": 0.5,
-    "Çözmedi": -1.0,
-    "Muaf": 0.0,
-}
-MOMENTUM_BONUS = 0.5
-MOMENTUM_PENCERE = 3
+# 1) UYGULAMA YAPILANDIRMASI
+st.set_page_config(
+    page_title="Tuyun Momentum Sistemi",
+    page_icon="🌱",
+    layout="wide",
+    initial_sidebar_state="expanded"
+)
 
-ARAMA_SONUCU_SECENEKLERI = [
-    "Ulaşıldı - Olumlu / Devam Ediyor",
-    "Ulaşıldı - Engel Var (görüşme planlandı)",
-    "Ulaşılamadı - Tekrar Denenecek",
-    "Aranmadı",
-]
-
-
-# ===================================================================
-# 2) DİNAMİK EXCEL TEMİZLEME VE SÜTUN DÜZENLEME
-# ===================================================================
-def normalize_excel(uploaded_file) -> pd.DataFrame:
-    """Hocanın Excel yapısındaki başlık offseti ve sütun ismi farklılıklarını düzeltir."""
-    if uploaded_file is None:
-        return pd.DataFrame()
-
-    df_raw = pd.read_excel(uploaded_file, header=None)
-    header_idx = 0
-
-    for i in range(min(10, len(df_raw))):
-        row_str = " ".join([str(val).lower() for val in df_raw.iloc[i].values])
-        if any(keyword in row_str for keyword in ["adi", "numarasi", "telefon", "soyad"]):
-            header_idx = i
-            break
-
-    uploaded_file.seek(0)
-    df = pd.read_excel(uploaded_file, header=header_idx)
-
-    col_map = {}
-    for col in df.columns:
-        col_clean = str(col).strip().lower()
-        if "adi" in col_clean or "soyad" in col_clean:
-            col_map[col] = "Ad_Soyad"
-        elif "numara" in col_clean or "id" in col_clean:
-            col_map[col] = "Ogrenci_ID"
-        elif "telefon" in col_clean and "veli" not in col_clean:
-            col_map[col] = "Telefon"
-
-    df = df.rename(columns=col_map)
-
-    if "Ad_Soyad" not in df.columns:
-        return pd.DataFrame()
-
-    if "Ogrenci_ID" not in df.columns:
-        df["Ogrenci_ID"] = 0
-
-    df["Ad_Soyad"] = df["Ad_Soyad"].astype(str).str.strip()
-
-    def parse_id(row):
-        val = str(row["Ogrenci_ID"]).split(".")[0].strip()
-        if val in ["0", "nan", "None", "", "None"]:
-            return abs(hash(row["Ad_Soyad"])) % 1000000
-        try:
-            return int(val)
-        except:
-            return abs(hash(row["Ad_Soyad"])) % 1000000
-
-    df["Ogrenci_ID"] = df.apply(parse_id, axis=1)
-
-    if "Telefon" not in df.columns:
-        df["Telefon"] = ""
-
-    return df
-
-
-# ===================================================================
-# 3) VERİTABANI KATMANI
-# ===================================================================
-def get_conn() -> sqlite3.Connection:
-    return sqlite3.connect(DB_PATH)
-
-
-def init_db() -> None:
-    conn = get_conn()
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS ogrenciler (
-            ogrenci_id INTEGER PRIMARY KEY,
-            ad_soyad TEXT NOT NULL,
-            telefon TEXT,
-            kayit_tarihi TEXT
-        )
-    """)
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS haftalik_kayitlar (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            ogrenci_id INTEGER NOT NULL,
-            hafta_no INTEGER NOT NULL,
-            durum TEXT NOT NULL,
-            yukleme_zamani TEXT DEFAULT CURRENT_TIMESTAMP,
-            UNIQUE(ogrenci_id, hafta_no),
-            FOREIGN KEY(ogrenci_id) REFERENCES ogrenciler(ogrenci_id)
-        )
-    """)
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS arama_notlari (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            ogrenci_id INTEGER NOT NULL,
-            hafta_no INTEGER NOT NULL,
-            arama_sonucu TEXT NOT NULL,
-            not_metni TEXT,
-            arayan TEXT,
-            kayit_zamani TEXT DEFAULT CURRENT_TIMESTAMP,
-            FOREIGN KEY(ogrenci_id) REFERENCES ogrenciler(ogrenci_id)
-        )
-    """)
-    conn.commit()
-    conn.close()
-
-
-def ogrencileri_kaydet(conn, df_ogrenci: pd.DataFrame) -> None:
-    for _, r in df_ogrenci.iterrows():
-        conn.execute(
-            """INSERT INTO ogrenciler (ogrenci_id, ad_soyad, telefon, kayit_tarihi)
-               VALUES (?, ?, ?, ?)
-               ON CONFLICT(ogrenci_id) DO UPDATE SET
-                   ad_soyad=excluded.ad_soyad,
-                   telefon=excluded.telefon,
-                   kayit_tarihi=excluded.kayit_tarihi""",
-            (
-                int(r["Ogrenci_ID"]),
-                str(r["Ad_Soyad"]),
-                str(r.get("Telefon", "")),
-                datetime.now().strftime("%Y-%m-%d"),
-            ),
-        )
-
-
-def haftalik_kayit_ekle(conn, ogrenci_id: int, hafta_no: int, durum: str) -> None:
-    durum_val = str(durum).strip() if durum else "Muaf"
-    conn.execute(
-        """INSERT INTO haftalik_kayitlar (ogrenci_id, hafta_no, durum, yukleme_zamani)
-           VALUES (?, ?, ?, ?)
-           ON CONFLICT(ogrenci_id, hafta_no) DO UPDATE SET
-               durum=excluded.durum,
-               yukleme_zamani=excluded.yukleme_zamani""",
-        (
-            int(ogrenci_id),
-            int(hafta_no),
-            durum_val,
-            datetime.now().isoformat(timespec="seconds"),
-        ),
-    )
-
-
-def arama_notu_ekle(ogrenci_id: int, hafta_no: int, sonuc: str, not_metni: str, arayan: str) -> None:
-    conn = get_conn()
-    conn.execute(
-        """INSERT INTO arama_notlari (ogrenci_id, hafta_no, arama_sonucu, not_metni, arayan, kayit_zamani)
-           VALUES (?, ?, ?, ?, ?, ?)""",
-        (ogrenci_id, hafta_no, sonuc, not_metni, arayan, datetime.now().isoformat(timespec="seconds")),
-    )
-    conn.commit()
-    conn.close()
-
-
-def tum_veriyi_oku():
-    conn = get_conn()
-    df_ogrenciler = pd.read_sql_query("SELECT * FROM ogrenciler", conn)
-    df_kayitlar = pd.read_sql_query("SELECT * FROM haftalik_kayitlar", conn)
-    df_aramalar = pd.read_sql_query("SELECT * FROM arama_notlari ORDER BY kayit_zamani DESC", conn)
-    conn.close()
-    return df_ogrenciler, df_kayitlar, df_aramalar
-
-
-def sonraki_hafta_no() -> int:
-    conn = get_conn()
-    sonuc = conn.execute("SELECT MAX(hafta_no) FROM haftalik_kayitlar").fetchone()[0]
-    conn.close()
-    return int(sonuc) + 1 if sonuc is not None else 1
-
-
-def cift_excel_islem_ve_yukle(file_cozenler, file_cozmeyenler, hafta_no: int) -> int:
-    conn = get_conn()
-
-    df_cozenler = normalize_excel(file_cozenler)
-    if not df_cozenler.empty:
-        df_cozenler["Durum"] = "Vaktinde Çözdü"
-
-    df_cozmeyenler = normalize_excel(file_cozmeyenler)
-    if not df_cozmeyenler.empty:
-        df_cozmeyenler["Durum"] = "Çözmedi"
-
-    df_birlesik = pd.concat([df_cozenler, df_cozmeyenler], ignore_index=True)
-
-    if df_birlesik.empty:
-        conn.close()
-        return 0
-
-    ogrencileri_kaydet(conn, df_birlesik)
-
-    for _, r in df_birlesik.iterrows():
-        haftalik_kayit_ekle(conn, int(r["Ogrenci_ID"]), hafta_no, r["Durum"])
-
-    conn.commit()
-    conn.close()
-    return len(df_birlesik)
-
-
-def veritabanini_sifirla() -> None:
-    """Tüm tabloları temizler."""
-    conn = get_conn()
-    conn.execute("DELETE FROM arama_notlari")
-    conn.execute("DELETE FROM haftalik_kayitlar")
-    conn.execute("DELETE FROM ogrenciler")
-    conn.commit()
-    conn.close()
-
-
-# ===================================================================
-# 4) İŞ MANTIĞI HESAPLAMALARI
-# ===================================================================
-def ogrenci_metriklerini_hesapla(df_kayitlar: pd.DataFrame) -> pd.DataFrame:
-    if df_kayitlar.empty:
-        return pd.DataFrame(columns=["ogrenci_id", "temel_puan", "momentum_bonusu", "toplam_puan"])
-
-    df = df_kayitlar.copy()
-    df["puan"] = df["durum"].map(PUAN_TABLOSU).fillna(0.0)
-    temel = df.groupby("ogrenci_id")["puan"].sum().rename("temel_puan")
-
-    momentum_kayitlari = []
-    for ogrenci_id, grup in df.groupby("ogrenci_id"):
-        grup_sirali = grup.sort_values("hafta_no", ascending=False)
-        son_n = grup_sirali.head(MOMENTUM_PENCERE)
-        bonus = 0.0
-        if len(son_n) == MOMENTUM_PENCERE:
-            haftalar = sorted(son_n["hafta_no"].tolist())
-            ardisik = haftalar == list(range(haftalar[0], haftalar[0] + MOMENTUM_PENCERE))
-            hepsi_vaktinde = all(son_n["durum"] == "Vaktinde Çözdü")
-            if ardisik and hepsi_vaktinde:
-                bonus = MOMENTUM_BONUS
-        momentum_kayitlari.append({"ogrenci_id": ogrenci_id, "momentum_bonusu": bonus})
-
-    momentum_df = pd.DataFrame(momentum_kayitlari).set_index("ogrenci_id")["momentum_bonusu"]
-    sonuc = pd.concat([temel, momentum_df], axis=1).fillna(0.0)
-    sonuc["toplam_puan"] = sonuc["temel_puan"] + sonuc["momentum_bonusu"]
-    return sonuc.reset_index()
-
-
-def arama_listesi_hesapla(df_kayitlar: pd.DataFrame):
-    if df_kayitlar.empty:
-        return pd.DataFrame(columns=["ogrenci_id"]), None, None
-
-    son_hafta = int(df_kayitlar["hafta_no"].max())
-    onceki_hafta = son_hafta - 1
-
-    # Son 2 haftanın durumuna bak
-    pivot = df_kayitlar[df_kayitlar["hafta_no"].isin([onceki_hafta, son_hafta])]
-    if pivot.empty:
-        return pd.DataFrame(columns=["ogrenci_id"]), son_hafta, onceki_hafta
-
-    pivot = pivot.pivot_table(index="ogrenci_id", columns="hafta_no", values="durum", aggfunc="first")
-
-    if son_hafta not in pivot.columns or onceki_hafta not in pivot.columns:
-        return pd.DataFrame(columns=["ogrenci_id"]), son_hafta, onceki_hafta
-
-    # 1. Kural: Son 2 hafta üst üste 'Çözmedi' olan riskli öğrenciler
-    risk = pivot[(pivot[onceki_hafta] == "Çözmedi") & (pivot[son_hafta] == "Çözmedi")].reset_index()
-
-    if risk.empty:
-        return pd.DataFrame(columns=["ogrenci_id"]), son_hafta, onceki_hafta
-
-    # 2. Kural (Cooldown/Dinlendirme):
-    # Son 2 hafta içinde (bu hafta ve bir önceki hafta) zaten aranmış olan öğrencileri getir
-    conn = get_conn()
-    arananlar_df = pd.read_sql_query(
-        "SELECT DISTINCT ogrenci_id FROM arama_notlari WHERE hafta_no IN (?, ?) AND arama_sonucu != 'Aranmadı'",
-        conn,
-        params=(son_hafta, onceki_hafta)
-    )
-    conn.close()
-
-    # Eğer son 2 hafta içinde arandıysa arama listesinden çıkar (Dinlendirme kuralı)
-    if not arananlar_df.empty:
-        risk = risk[~risk["ogrenci_id"].isin(arananlar_df["ogrenci_id"])]
-
-    return risk.rename(columns={onceki_hafta: "onceki_durum", son_hafta: "son_durum"}), son_hafta, onceki_hafta
-
-def whatsapp_mesaji_olustur(ad_soyad: str) -> str:
-    ilk_isim = str(ad_soyad).split()[0]
-    return (
-        f"Merhaba, {ilk_isim} için Tuyun Akademi'den yazıyoruz. 🌱\n"
-        f"Son iki haftadır deneme çözme takibinde {ilk_isim}'i göremedik. "
-        f"Bunun bir sebebi olabilir, merak ettik ve yardımcı olmak istedik. "
-        f"Uygun olduğunuzda kısa bir görüşme yapabilir miyiz? "
-        f"Amacımız baskı kurmak değil, birlikte tekrar düzenli bir ritme geçmek. 🙏"
-    )
-
-
-def genel_yorum_uret(ortalama_puan: float) -> str:
-    if ortalama_puan >= 1.0:
-        return "Sınıf geneli pozitif bir momentum sergiliyor. Süreç stabil devam ediyor."
-    elif ortalama_puan >= 0:
-        return "Sınıf geneli nötr-pozitif bantta. Riskli öğrencilere odaklanılabilir."
-    else:
-        return "⚠️ Sınıf ortalaması negatif. 'Çözmedi' sayısı yüksek."
-
-
-# ===================================================================
-# 5) STREAMLIT ARAYÜZÜ
-# ===================================================================
-st.set_page_config(page_title="Tuyun Momentum Sistemi", page_icon="🎯", layout="wide")
+# Veritabanını başlat
 init_db()
 
-st.title("🎯 Tuyun Momentum Sistemi")
-st.caption(f"Veritabanı: `{DB_PATH.name}` (otomatik bağlandı)")
+# 2) SOL MENÜ VE FİLTRELER
+st.sidebar.title("🌱 Tuyun Momentum")
+st.sidebar.markdown("---")
 
-with st.sidebar:
-    st.header("📂 Haftalık Veri Yükleme")
+secilen_sinif = st.sidebar.selectbox("Sınıf Seviyesi Filtresi", SINIF_SEVIYELERI)
 
-    file_cozenler = st.file_uploader("1. Çözenler Listesi (.xlsx)", type=["xlsx", "xls"], key="cozenler")
-    file_cozmeyenler = st.file_uploader("2. Çözmeyenler Listesi (.xlsx)", type=["xlsx", "xls"], key="cozmeyenler")
-
-    onerilen_hafta = sonraki_hafta_no()
-    hafta_no = st.number_input("Bu veriler hangi hafta için?", min_value=1, value=onerilen_hafta, step=1)
-
-    if st.button("✅ İki Listeyi İşle ve Kaydet", type="primary"):
-        if file_cozenler is None and file_cozmeyenler is None:
-            st.error("Lütfen en az bir Excel dosyası yükleyin.")
-        else:
-            toplam_kayit = cift_excel_islem_ve_yukle(file_cozenler, file_cozmeyenler, int(hafta_no))
-            st.cache_data.clear()
-            st.success(f"Hafta {hafta_no}: Toplam {toplam_kayit} öğrenci verisi başarıyla işlendi.")
-            st.rerun()
-
-    st.divider()
-    df_ogrenciler_ozet, df_kayitlar_ozet, _ = tum_veriyi_oku()
-    st.metric("Kayıtlı Öğrenci", len(df_ogrenciler_ozet))
-    st.metric("İşlenmiş Hafta Sayısı", df_kayitlar_ozet["hafta_no"].nunique() if not df_kayitlar_ozet.empty else 0)
-
-    # -------------------------------------------------------------
-    # GÜVENLİ VERİTABANI SIFIRLAMA BÖLÜMÜ
-    # -------------------------------------------------------------
-    st.divider()
-    st.subheader("⚙️ Sistem Yönetimi")
-    onay = st.checkbox("Verileri silmeyi onaylıyorum")
-    if st.button("🗑️ Veritabanını Sıfırla", type="secondary"):
-        if onay:
-            veritabanini_sifirla()
-            st.cache_data.clear()
-            st.warning("Veritabanı tamamen sıfırlandı!")
-            st.rerun()
-        else:
-            st.error("Lütfen önce yukarıdaki onay kutusunu işaretleyin.")
-
+# Veriyi oku
 df_ogrenciler, df_kayitlar, df_aramalar = tum_veriyi_oku()
 
-if df_kayitlar.empty:
-    st.info("👈 Henüz veri yüklenmedi. Başlamak için soldaki panelden Excel dosyalarını yükleyin.")
-    st.stop()
+# Sınıf Filtresi Uygula
+if secilen_sinif != "Tüm Sınıflar" and not df_ogrenciler.empty:
+    df_ogrenciler = df_ogrenciler[df_ogrenciler["sinif_seviyesi"] == secilen_sinif]
+    if not df_kayitlar.empty:
+        df_kayitlar = df_kayitlar[df_kayitlar["ogrenci_id"].isin(df_ogrenciler["ogrenci_id"])]
+    if not df_aramalar.empty:
+        df_aramalar = df_aramalar[df_aramalar["ogrenci_id"].isin(df_ogrenciler["ogrenci_id"])]
 
-metrikler = ogrenci_metriklerini_hesapla(df_kayitlar)
-metrikler = metrikler.merge(df_ogrenciler, on="ogrenci_id", how="left")
+# 3) ANA SAYFA SEKMELERİ
+tab1, tab2, tab3, tab4 = st.tabs([
+    "📥 Veri Yükleme", 
+    "📊 Genel Tablo & Skorlar", 
+    "📞 Arama / Müdahale Listesi", 
+    "⚙️ Yönetim & Ayarlar"
+])
 
-arama_listesi, son_hafta, onceki_hafta = arama_listesi_hesapla(df_kayitlar)
-if not arama_listesi.empty:
-    arama_listesi = arama_listesi.merge(df_ogrenciler, on="ogrenci_id", how="left")
-
-col1, col2, col3, col4 = st.columns(4)
-col1.metric("Toplam Öğrenci", len(df_ogrenciler))
-col2.metric("Ortalama Puan", f"{metrikler['toplam_puan'].mean():.2f}" if not metrikler.empty else "—")
-col3.metric("Aktif Hafta", son_hafta if son_hafta else "—")
-col4.metric("Arama Listesi", len(arama_listesi), delta_color="inverse")
-
-st.divider()
-
-tab1, tab2, tab3, tab4, tab5 = st.tabs(["📞 Arama Listesi", "🏆 Scoreboard", "🤖 AI Analist Raporu", "📈 Öğrenci Geçmişi", "🗂️ Arama Geçmişi"])
-
+# TAB 1: VERİ YÜKLEME (TAM KADRO PARALLEL TASARIM)
 with tab1:
-    st.subheader(f"Hafta {son_hafta} Operasyonel Arama Listesi" if son_hafta else "Arama Listesi")
-    if arama_listesi.empty:
-        st.success("Risk altında öğrenci yok. ✅")
-    else:
-        goster = arama_listesi[["ogrenci_id", "ad_soyad", "telefon", "onceki_durum", "son_durum"]]
-        st.dataframe(goster, use_container_width=True, hide_index=True)
+    st.header("📁 Haftalık Veri Yükleme")
+    
+    # 1 ve 2. Dosya Yükleme
+    cozenler_file = st.file_uploader("1. Çözenler Listesi (.xlsx)", type=["xlsx", "xls"], key="cozenler")
+    cozmeyenler_file = st.file_uploader("2. Çözmeyenler Listesi (.xlsx)", type=["xlsx", "xls"], key="cozmeyenler")
+    
+    st.markdown("---")
+    
+    # Tüm Parametre Alanları (Ay, Sınıf, Hafta No, Ay Sonu Onayı)
+    col_p1, col_p2 = st.columns(2)
+    
+    with col_p1:
+        secilen_ay = st.selectbox("Ait Olduğu Ay", AYLAR)
+        hafta_no = st.number_input("Bu veriler hangi hafta / deneme için?", min_value=1, value=1, step=1)
+        
+    with col_p2:
+        yukleme_sinifi = st.selectbox("Yüklenen Sınıf Seviyesi", [s for s in SINIF_SEVIYELERI if s != "Tüm Sınıflar"])
+        is_ay_sonu = st.checkbox("Bu deneme ayın son denemesidir (Momentum Bonusu Hesaplansın)")
 
-        for _, r in arama_listesi.iterrows():
-            with st.expander(f"{r['ad_soyad']} (ID {r['ogrenci_id']})"):
-                st.text_area("WhatsApp Mesajı", value=whatsapp_mesaji_olustur(r["ad_soyad"]), height=100, key=f"msg_{r['ogrenci_id']}")
-                with st.form(key=f"form_{r['ogrenci_id']}"):
-                    sonuc = st.selectbox("Sonuc", ARAMA_SONUCU_SECENEKLERI, key=f"res_{r['ogrenci_id']}")
-                    not_metni = st.text_area("Not", key=f"note_{r['ogrenci_id']}")
-                    arayan = st.text_input("Arayan", key=f"who_{r['ogrenci_id']}")
-                    if st.form_submit_button("Kaydet"):
-                        arama_notu_ekle(int(r["ogrenci_id"]), int(son_hafta), sonuc, not_metni, arayan)
+    st.markdown("<br>", unsafe_allow_html=True)
+
+    if st.button("✅ İki Listeyi İşle ve Kaydet", type="primary"):
+        if cozenler_file is None and cozmeyenler_file is None:
+            st.error("Lütfen en az bir dosya (Çözenler veya Çözmeyenler) yükleyin.")
+        else:
+            df_norm = normalize_excel_pair(cozenler_file, cozmeyenler_file, sinif_seviyesi=yukleme_sinifi)
+            if df_norm.empty:
+                st.error("Excel dosyalarından geçerli öğrenci verisi okunamadı.")
+            else:
+                conn = get_conn()
+                if conn:
+                    try:
+                        ogrencileri_kaydet(conn, df_norm)
+                        
+                        kayitlar = []
+                        for _, row in df_norm.iterrows():
+                            kayitlar.append((
+                                int(row["Ogrenci_ID"]),
+                                secilen_ay,          # Seçtiğin Ay
+                                int(hafta_no),       # Seçtiğin Hafta
+                                int(hafta_no),       # Hafta Index
+                                str(row["Durum"]),
+                                is_ay_sonu           # Seçtiğin Ay Sonu Onayı (True/False)
+                            ))
+                            
+                        with conn.cursor() as cur:
+                            from psycopg2.extras import execute_batch
+                            query = """
+                                INSERT INTO deneme_kayitlari (ogrenci_id, ay_adi, deneme_no, hafta_index, durum, is_ay_sonu)
+                                VALUES (%s, %s, %s, %s, %s, %s)
+                                ON CONFLICT (ogrenci_id, ay_adi, deneme_no) DO UPDATE SET
+                                    durum = EXCLUDED.durum,
+                                    hafta_index = EXCLUDED.hafta_index,
+                                    is_ay_sonu = EXCLUDED.is_ay_sonu;
+                            """
+                            execute_batch(cur, query, kayitlar)
+                            conn.commit()
+                        
+                        st.success(f"✅ {len(df_norm)} öğrencinin verisi {secilen_ay} ayı ({hafta_no}. hafta) için başarıyla kaydedildi!")
                         st.cache_data.clear()
-                        st.success("Not eklendi.")
+                        st.rerun()
+                    except Exception as e:
+                        conn.rollback()
+                        st.error(f"Yükleme hatası: {e}")
+                    finally:
+                        conn.close()
+
+    st.markdown("---")
+    
+    # Alt Metrikler
+    m_col1, m_col2 = st.columns(2)
+    toplam_ogrenci_sayisi = len(df_ogrenciler) if not df_ogrenciler.empty else 0
+    toplam_hafta_sayisi = df_kayitlar["hafta_index"].nunique() if not df_kayitlar.empty else 0
+    
+    with m_col1:
+        st.metric("Kayıtlı Öğrenci", toplam_ogrenci_sayisi)
+    with m_col2:
+        st.metric("İşlenmiş Hafta Sayısı", toplam_hafta_sayisi)
+
+# TAB 2: GENEL TABLO & SKORLAR
+with tab2:
+    st.header("Öğrenci Momentum Skorları")
+    
+    if df_ogrenciler.empty or df_kayitlar.empty:
+        st.info("Henüz veritabanında yüklenmiş deneme kaydı bulunmuyor.")
+    else:
+        df_metrikler = ogrenci_metriklerini_hesapla(df_kayitlar)
+        df_ozet = df_ogrenciler.merge(df_metrikler, on="ogrenci_id", how="left").fillna(0.0)
+        
+        st.dataframe(
+            df_ozet[["ogrenci_id", "ad_soyad", "sinif_seviyesi", "temel_puan", "momentum_bonusu", "toplam_puan"]]
+            .sort_values(by="toplam_puan", ascending=False),
+            use_container_width=True
+        )
+
+# TAB 3: ARAMA / MÜDAHALE LİSTESİ
+with tab3:
+    st.header("📞 Arama & Müdahale Listesi (Üst Üste 2 Hafta Çözmeyenler)")
+    
+    if df_kayitlar.empty:
+        st.info("Kayıtlı deneme bulunmadığı için liste oluşturulamıyor.")
+    else:
+        risk_df, son_h, onceki_h = arama_listesi_hesapla(df_kayitlar, df_aramalar)
+        
+        if risk_df.empty:
+            st.success("🎉 Harika! Üst üste 2 hafta çözmeyen ve aranması gereken öğrenci bulunmuyor.")
+        else:
+            risk_full = risk_df.merge(df_ogrenciler, on="ogrenci_id", how="inner")
+            st.warning(f"⚠️ Toplam {len(risk_full)} öğrenci takibe takıldı.")
+            
+            for _, row in risk_full.iterrows():
+                with st.expander(f"👤 {row['ad_soyad']} ({row.get('sinif_seviyesi', 'Belirtilmedi')})"):
+                    st.write(f"**Telefon:** {row.get('telefon', 'Yok')}")
+                    st.write(f"**Son Durumlar:** {onceki_h}. Hafta ({row['onceki_durum']}) | {son_h}. Hafta ({row['son_durum']})")
+                    
+                    wa_msg = whatsapp_mesaji_olustur(row['ad_soyad'])
+                    st.text_area("WhatsApp Mesaj Taslağı", wa_msg, height=100, key=f"wa_{row['ogrenci_id']}")
+                    
+                    col_a1, col_a2 = st.columns(2)
+                    with col_a1:
+                        arama_sonucu = st.selectbox(
+                            "Arama Sonucu", 
+                            ARAMA_SONUCU_SECENEKLERI, 
+                            key=f"sec_{row['ogrenci_id']}"
+                        )
+                    with col_a2:
+                        arayan_kisi = st.text_input("Arayan Kişi", value="Rehberlik", key=f"arayan_{row['ogrenci_id']}")
+                    
+                    not_metni = st.text_input("Arama Notu", key=f"not_{row['ogrenci_id']}")
+                    
+                    if st.button("Aramayı Kaydet", key=f"btn_{row['ogrenci_id']}"):
+                        arama_notu_ekle(
+                            ogrenci_id=row['ogrenci_id'],
+                            hafta_index=son_h,
+                            sonuc=arama_sonucu,
+                            not_metni=not_metni,
+                            arayan=arayan_kisi
+                        )
+                        st.success("Arama notu başarıyla kaydedildi!")
                         st.rerun()
 
-with tab2:
-    st.subheader("Scoreboard (Kümülatif)")
-    siralanmis = metrikler.sort_values("toplam_puan", ascending=False).reset_index(drop=True)
-    st.dataframe(siralanmis[["ogrenci_id", "ad_soyad", "temel_puan", "momentum_bonusu", "toplam_puan"]], use_container_width=True, hide_index=True)
-
-with tab3:
-    st.subheader("🤖 AI Analist Raporu")
-    avg_puan = metrikler["toplam_puan"].mean() if not metrikler.empty else 0
-    st.write(genel_yorum_uret(avg_puan))
-
+# TAB 4: YÖNETİM & AYARLAR
 with tab4:
-    st.subheader("📈 Öğrenci Geçmişi")
-    secim_listesi = df_ogrenciler.apply(lambda r: f"{r['ad_soyad']} (ID {r['ogrenci_id']})", axis=1).tolist()
-    if secim_listesi:
-        secilen = st.selectbox("Öğrenci Seçin", secim_listesi)
-        secilen_id = int(secilen.split("ID ")[1].rstrip(")"))
-        ogrenci_kayitlari = df_kayitlar[df_kayitlar["ogrenci_id"] == secilen_id].sort_values("hafta_no")
-        st.dataframe(ogrenci_kayitlari[["hafta_no", "durum"]], use_container_width=True, hide_index=True)
-
-with tab5:
-    st.subheader("🗂️ Tüm Arama Geçmişi")
-    if not df_aramalar.empty:
-        birlesik = df_aramalar.merge(df_ogrenciler, on="ogrenci_id", how="left")
-        st.dataframe(birlesik[["kayit_zamani", "hafta_no", "ad_soyad", "arama_sonucu", "not_metni"]], use_container_width=True, hide_index=True)
-    else:
-        st.info("Arama kaydı bulunamadı.")
+    st.header("⚙️ Sistem Yönetimi")
+    st.warning("🚨 Bu alandaki işlemler geri alınamaz!")
+    
+    if st.button("🗑️ TÜM VERİTABANINI SIFIRLA", type="primary"):
+        veritabanini_sifirla()
+        st.success("Veritabanı sıfırlandı!")
+        st.rerun()
