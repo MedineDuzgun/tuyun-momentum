@@ -1,7 +1,7 @@
 """
 tuyun_momentum_app.py
 -----------------------
-Tuyun Akademi - Tuyun Momentum Sistemi (Ay Sonu Bonus & Sınıf Seviyesi Güncellenmiş Sürüm)
+Tuyun Akademi - Tuyun Momentum Sistemi (Manuel Sınıf Seçimi & Telefon Hash'li ID Sistemi)
 """
 
 import psycopg2
@@ -43,7 +43,7 @@ ARAMA_SONUCU_SECENEKLERI = [
 ]
 
 # ===================================================================
-# 2) DİNAMİK EXCEL TEMİZLEME VE MÜKERRER KAYIT ENGELLEME
+# 2) DİNAMİK EXCEL TEMİZLEME VE HASH TABANLI ID ÜRETİMİ
 # ===================================================================
 def normalize_excel(uploaded_file, secilen_sinif_manuel: str = "Belirtilmedi") -> pd.DataFrame:
     if uploaded_file is None:
@@ -52,15 +52,17 @@ def normalize_excel(uploaded_file, secilen_sinif_manuel: str = "Belirtilmedi") -
     df_raw = pd.read_excel(uploaded_file, header=None)
     header_idx = 0
 
+    # Başlık satırını bulma
     for i in range(min(10, len(df_raw))):
         row_str = " ".join([str(val).lower() for val in df_raw.iloc[i].values])
-        if any(keyword in row_str for keyword in ["adi", "numarasi", "telefon", "soyad", "sinif", "seviye"]):
+        if any(keyword in row_str for keyword in ["adi", "numarasi", "telefon", "soyad"]):
             header_idx = i
             break
 
     uploaded_file.seek(0)
     df = pd.read_excel(uploaded_file, header=header_idx)
 
+    # Sütun isimlerini standartlaştırma
     col_map = {}
     for col in df.columns:
         col_clean = str(col).strip().lower()
@@ -70,8 +72,6 @@ def normalize_excel(uploaded_file, secilen_sinif_manuel: str = "Belirtilmedi") -
             col_map[col] = "Ogrenci_ID"
         elif "telefon" in col_clean and "veli" not in col_clean:
             col_map[col] = "Telefon"
-        elif "sinif" in col_clean or "seviye" in col_clean or "duzey" in col_clean:
-            col_map[col] = "Sinif_Seviyesi"
 
     df = df.rename(columns=col_map)
 
@@ -81,30 +81,34 @@ def normalize_excel(uploaded_file, secilen_sinif_manuel: str = "Belirtilmedi") -
     if "Ogrenci_ID" not in df.columns:
         df["Ogrenci_ID"] = 0
 
+    if "Telefon" not in df.columns:
+        df["Telefon"] = ""
+
+    # İsim Temizliği
     df["Ad_Soyad"] = df["Ad_Soyad"].astype(str).str.replace("i̇", "i").str.replace("I", "ı").str.strip().str.title()
 
-    def parse_id(row):
+    # --- AD + SOYAD + TELEFON HASH'LEME İLE BENZERSİZ ID ÜRETİMİ ---
+    def generate_unique_id(row):
         val = str(row["Ogrenci_ID"]).split(".")[0].strip()
+        name_clean = str(row["Ad_Soyad"]).strip().lower()
+        phone_clean = str(row.get("Telefon", "")).replace(" ", "").replace("-", "").replace("(", "").replace(")", "").strip()
+
+        # Eğer okul numarası yoksa, 0 veya geçersizse: Ad + Soyad + Telefon hash'i al
         if val in ["0", "nan", "None", "", "null"]:
-            name_clean = str(row["Ad_Soyad"]).strip().lower()
-            hash_val = hashlib.sha256(name_clean.encode('utf-8')).hexdigest()
+            unique_str = f"{name_clean}_{phone_clean}"
+            hash_val = hashlib.sha256(unique_str.encode('utf-8')).hexdigest()
             return int(hash_val[:8], 16) % 1000000
         try:
             return int(val)
         except:
-            name_clean = str(row["Ad_Soyad"]).strip().lower()
-            hash_val = hashlib.sha256(name_clean.encode('utf-8')).hexdigest()
+            unique_str = f"{name_clean}_{phone_clean}"
+            hash_val = hashlib.sha256(unique_str.encode('utf-8')).hexdigest()
             return int(hash_val[:8], 16) % 1000000
 
-    df["Ogrenci_ID"] = df.apply(parse_id, axis=1)
+    df["Ogrenci_ID"] = df.apply(generate_unique_id, axis=1)
 
-    if "Telefon" not in df.columns:
-        df["Telefon"] = ""
-
-    if "Sinif_Seviyesi" not in df.columns or df["Sinif_Seviyesi"].isna().all():
-        df["Sinif_Seviyesi"] = secilen_sinif_manuel
-    else:
-        df["Sinif_Seviyesi"] = df["Sinif_Seviyesi"].astype(str).str.strip()
+    # Sınıf Seviyesi manuel panelden gelen değer olarak atanır
+    df["Sinif_Seviyesi"] = secilen_sinif_manuel
 
     return df
 
@@ -168,8 +172,9 @@ def init_db() -> None:
 
 def ogrencileri_kaydet(conn, df_ogrenci: pd.DataFrame) -> None:
     with conn.cursor() as cur:
-        cur.execute("SELECT ad_soyad, ogrenci_id FROM ogrenciler;")
-        mevcut_ogrenciler = {row[0].strip().lower(): row[1] for row in cur.fetchall()}
+        # İsim ve Telefon ikilisine göre eşleştirme kontrolü
+        cur.execute("SELECT LOWER(ad_soyad), REGEXP_REPLACE(telefon, '[^0-9]', '', 'g'), ogrenci_id FROM ogrenciler;")
+        mevcut_ogrenciler = {(row[0].strip(), row[1].strip()): row[2] for row in cur.fetchall()}
 
         kayit_verileri = []
         bugun = datetime.now().strftime("%Y-%m-%d")
@@ -177,8 +182,10 @@ def ogrencileri_kaydet(conn, df_ogrenci: pd.DataFrame) -> None:
         for _, r in df_ogrenci.iterrows():
             ad = str(r["Ad_Soyad"]).strip()
             ad_key = ad.lower()
+            tel_clean = str(r.get("Telefon", "")).replace(" ", "").replace("-", "").replace("(", "").replace(")", "").strip()
             
-            o_id = mevcut_ogrenciler.get(ad_key, int(r["Ogrenci_ID"]))
+            key = (ad_key, tel_clean)
+            o_id = mevcut_ogrenciler.get(key, int(r["Ogrenci_ID"]))
             sinif = str(r.get("Sinif_Seviyesi", "Belirtilmedi")).strip()
             
             kayit_verileri.append((o_id, ad, str(r.get("Telefon", "")), sinif, bugun))
@@ -275,8 +282,8 @@ def cift_excel_islem_ve_yukle(file_cozenler, file_cozmeyenler, ay_adi: str, dene
     h_idx = sonraki_hafta_index()
 
     cur = conn.cursor()
-    cur.execute("SELECT LOWER(ad_soyad), ogrenci_id FROM ogrenciler")
-    id_map = {row[0]: row[1] for row in cur.fetchall()}
+    cur.execute("SELECT LOWER(ad_soyad), REGEXP_REPLACE(telefon, '[^0-9]', '', 'g'), ogrenci_id FROM ogrenciler")
+    id_map = {(row[0].strip(), row[1].strip()): row[2] for row in cur.fetchall()}
 
     if is_ay_sonu:
         cur.execute("UPDATE deneme_kayitlari SET is_ay_sonu = TRUE WHERE ay_adi = %s", (ay_adi,))
@@ -286,7 +293,10 @@ def cift_excel_islem_ve_yukle(file_cozenler, file_cozmeyenler, ay_adi: str, dene
 
     for _, r in df_birlesik.iterrows():
         ad_clean = str(r["Ad_Soyad"]).strip().lower()
-        real_id = id_map.get(ad_clean, int(r["Ogrenci_ID"]))
+        tel_clean = str(r.get("Telefon", "")).replace(" ", "").replace("-", "").replace("(", "").replace(")", "").strip()
+        key = (ad_clean, tel_clean)
+        
+        real_id = id_map.get(key, int(r["Ogrenci_ID"]))
         durum_val = str(r["Durum"]).strip() if r["Durum"] else "Muaf"
         deneme_verileri.append((real_id, ay_adi, int(deneme_no), int(h_idx), durum_val, is_ay_sonu, zaman_simdi))
 
@@ -442,7 +452,7 @@ with st.sidebar:
     secilen_ay = st.selectbox("Hangi Ay?", options=AYLAR)
     deneme_no = st.number_input("Ayın Kaçıncı Denemesi?", min_value=1, max_value=20, value=1, step=1)
     
-    secilen_sinif_yukleme = st.selectbox("Sınıf / Düzey Seçin", options=SINIF_SEVIYELERI[1:], help="Excel dosyasında Sınıf/Seviye sütunu yoksa bu değer atanacaktır.")
+    secilen_sinif_yukleme = st.selectbox("Sınıf / Düzey Seçin", options=SINIF_SEVIYELERI[1:], help="Yüklenen listenin ait olduğu sınıf seviyesini belirleyin.")
     
     is_ay_sonu = st.checkbox("🏁 Bu deneme, bu ayın son denemesi mi?", help="İşaretlenirse bu ay tamamlanmış kabul edilir ve tam çözenlere +0.5 Momentum Bonusu eklenir.")
 
@@ -573,7 +583,7 @@ with tab2:
     
     col_filter_1, col_filter_2 = st.columns([2, 1])
     with col_filter_1:
-        arama_kw = st.text_input("🔍 Öğrenci Ara (İsim veya ID)", placeholder="Örn: İlkay veya 505658")
+        arama_kw = st.text_input("🔍 Öğrenci Ara (İsim veya ID)", placeholder="Örn: Yağmur veya 734")
     with col_filter_2:
         secilen_sinif_filtre = st.selectbox("🎓 Sınıf Filtresi", options=SINIF_SEVIYELERI)
 
