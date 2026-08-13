@@ -1,7 +1,7 @@
 """
 tuyun_momentum_app.py
 -----------------------
-Tuyun Akademi - Tuyun Momentum Sistemi (Ay Sonu Bonus Güncellenmiş Sürüm)
+Tuyun Akademi - Tuyun Momentum Sistemi (Ay Sonu Bonus & Sınıf Seviyesi Güncellenmiş Sürüm)
 """
 
 import psycopg2
@@ -29,6 +29,12 @@ AYLAR = [
     "Temmuz", "Ağustos", "Eylül", "Ekim", "Kasım", "Aralık"
 ]
 
+SINIF_SEVIYELERI = [
+    "Tüm Sınıflar",
+    "5. Sınıf", "6. Sınıf", "7. Sınıf", "8. Sınıf",
+    "9. Sınıf", "10. Sınıf", "11. Sınıf", "12. Sınıf", "Mezun"
+]
+
 ARAMA_SONUCU_SECENEKLERI = [
     "Ulaşıldı - Olumlu / Devam Ediyor",
     "Ulaşıldı - Engel Var (görüşme planlandı)",
@@ -39,7 +45,7 @@ ARAMA_SONUCU_SECENEKLERI = [
 # ===================================================================
 # 2) DİNAMİK EXCEL TEMİZLEME VE MÜKERRER KAYIT ENGELLEME
 # ===================================================================
-def normalize_excel(uploaded_file) -> pd.DataFrame:
+def normalize_excel(uploaded_file, secilen_sinif_manuel: str = "Belirtilmedi") -> pd.DataFrame:
     if uploaded_file is None:
         return pd.DataFrame()
 
@@ -48,7 +54,7 @@ def normalize_excel(uploaded_file) -> pd.DataFrame:
 
     for i in range(min(10, len(df_raw))):
         row_str = " ".join([str(val).lower() for val in df_raw.iloc[i].values])
-        if any(keyword in row_str for keyword in ["adi", "numarasi", "telefon", "soyad"]):
+        if any(keyword in row_str for keyword in ["adi", "numarasi", "telefon", "soyad", "sinif", "seviye"]):
             header_idx = i
             break
 
@@ -64,6 +70,8 @@ def normalize_excel(uploaded_file) -> pd.DataFrame:
             col_map[col] = "Ogrenci_ID"
         elif "telefon" in col_clean and "veli" not in col_clean:
             col_map[col] = "Telefon"
+        elif "sinif" in col_clean or "seviye" in col_clean or "duzey" in col_clean:
+            col_map[col] = "Sinif_Seviyesi"
 
     df = df.rename(columns=col_map)
 
@@ -93,6 +101,11 @@ def normalize_excel(uploaded_file) -> pd.DataFrame:
     if "Telefon" not in df.columns:
         df["Telefon"] = ""
 
+    if "Sinif_Seviyesi" not in df.columns or df["Sinif_Seviyesi"].isna().all():
+        df["Sinif_Seviyesi"] = secilen_sinif_manuel
+    else:
+        df["Sinif_Seviyesi"] = df["Sinif_Seviyesi"].astype(str).str.strip()
+
     return df
 
 # ===================================================================
@@ -116,9 +129,12 @@ def init_db() -> None:
                         ogrenci_id BIGINT PRIMARY KEY,
                         ad_soyad TEXT NOT NULL,
                         telefon TEXT,
+                        sinif_seviyesi TEXT,
                         kayit_tarihi TEXT
                     );
                     
+                    ALTER TABLE ogrenciler ADD COLUMN IF NOT EXISTS sinif_seviyesi TEXT;
+
                     CREATE TABLE IF NOT EXISTS deneme_kayitlari (
                         id SERIAL PRIMARY KEY,
                         ogrenci_id BIGINT NOT NULL REFERENCES ogrenciler(ogrenci_id) ON DELETE CASCADE,
@@ -131,7 +147,6 @@ def init_db() -> None:
                         UNIQUE(ogrenci_id, ay_adi, deneme_no)
                     );
                     
-                    -- Varolan veritabanında is_ay_sonu sütunu yoksa ekle
                     ALTER TABLE deneme_kayitlari ADD COLUMN IF NOT EXISTS is_ay_sonu BOOLEAN DEFAULT FALSE;
 
                     CREATE TABLE IF NOT EXISTS arama_notlari (
@@ -164,14 +179,17 @@ def ogrencileri_kaydet(conn, df_ogrenci: pd.DataFrame) -> None:
             ad_key = ad.lower()
             
             o_id = mevcut_ogrenciler.get(ad_key, int(r["Ogrenci_ID"]))
-            kayit_verileri.append((o_id, ad, str(r.get("Telefon", "")), bugun))
+            sinif = str(r.get("Sinif_Seviyesi", "Belirtilmedi")).strip()
+            
+            kayit_verileri.append((o_id, ad, str(r.get("Telefon", "")), sinif, bugun))
 
         query = """
-            INSERT INTO ogrenciler (ogrenci_id, ad_soyad, telefon, kayit_tarihi)
-            VALUES (%s, %s, %s, %s)
+            INSERT INTO ogrenciler (ogrenci_id, ad_soyad, telefon, sinif_seviyesi, kayit_tarihi)
+            VALUES (%s, %s, %s, %s, %s)
             ON CONFLICT(ogrenci_id) DO UPDATE SET
                 ad_soyad=EXCLUDED.ad_soyad,
-                telefon=EXCLUDED.telefon
+                telefon=EXCLUDED.telefon,
+                sinif_seviyesi=EXCLUDED.sinif_seviyesi
         """
         execute_batch(cur, query, kayit_verileri)
 
@@ -234,16 +252,16 @@ def sonraki_hafta_index() -> int:
     conn.close()
     return int(sonuc) + 1 if sonuc is not None else 1
 
-def cift_excel_islem_ve_yukle(file_cozenler, file_cozmeyenler, ay_adi: str, deneme_no: int, is_ay_sonu: bool) -> int:
+def cift_excel_islem_ve_yukle(file_cozenler, file_cozmeyenler, ay_adi: str, deneme_no: int, is_ay_sonu: bool, secilen_sinif: str) -> int:
     conn = get_conn()
     if not conn:
         return 0
 
-    df_cozenler = normalize_excel(file_cozenler)
+    df_cozenler = normalize_excel(file_cozenler, secilen_sinif)
     if not df_cozenler.empty:
         df_cozenler["Durum"] = "Vaktinde Çözdü"
 
-    df_cozmeyenler = normalize_excel(file_cozmeyenler)
+    df_cozmeyenler = normalize_excel(file_cozmeyenler, secilen_sinif)
     if not df_cozmeyenler.empty:
         df_cozmeyenler["Durum"] = "Çözmedi"
 
@@ -260,7 +278,6 @@ def cift_excel_islem_ve_yukle(file_cozenler, file_cozmeyenler, ay_adi: str, dene
     cur.execute("SELECT LOWER(ad_soyad), ogrenci_id FROM ogrenciler")
     id_map = {row[0]: row[1] for row in cur.fetchall()}
 
-    # Eğer ayın son denemesi olarak işaretlendiyse, aynı ayın önceki denemelerini de güncelleyebiliriz
     if is_ay_sonu:
         cur.execute("UPDATE deneme_kayitlari SET is_ay_sonu = TRUE WHERE ay_adi = %s", (ay_adi,))
 
@@ -310,7 +327,6 @@ def ogrenci_metriklerini_hesapla(df_kayitlar: pd.DataFrame) -> pd.DataFrame:
     df["puan"] = df["durum"].map(PUAN_TABLOSU).fillna(0.0)
     temel = df.groupby("ogrenci_id")["puan"].sum().rename("temel_puan")
 
-    # Ay sonu olarak işaretlenmiş ayların tespiti
     if "is_ay_sonu" in df.columns:
         kapanmis_aylar = df[df["is_ay_sonu"] == True]["ay_adi"].unique().tolist()
     else:
@@ -326,7 +342,6 @@ def ogrenci_metriklerini_hesapla(df_kayitlar: pd.DataFrame) -> pd.DataFrame:
             o_ayki_toplam_deneme = df[df["ay_adi"] == ay]["deneme_no"].nunique()
             cozdugu_sayi = len(ay_grubu[ay_grubu["durum"] == "Vaktinde Çözdü"])
             
-            # Eğer ay kapandıysa ve öğrenci o ayın tüm denemelerini Vaktinde Çözdüyse bonus alır
             if o_ayki_toplam_deneme > 0 and cozdugu_sayi == o_ayki_toplam_deneme:
                 toplam_bonus += MOMENTUM_BONUS
 
@@ -427,14 +442,15 @@ with st.sidebar:
     secilen_ay = st.selectbox("Hangi Ay?", options=AYLAR)
     deneme_no = st.number_input("Ayın Kaçıncı Denemesi?", min_value=1, max_value=20, value=1, step=1)
     
-    # --- YENİ EKLENEN REVIZE KISMI ---
+    secilen_sinif_yukleme = st.selectbox("Sınıf / Düzey Seçin", options=SINIF_SEVIYELERI[1:], help="Excel dosyasında Sınıf/Seviye sütunu yoksa bu değer atanacaktır.")
+    
     is_ay_sonu = st.checkbox("🏁 Bu deneme, bu ayın son denemesi mi?", help="İşaretlenirse bu ay tamamlanmış kabul edilir ve tam çözenlere +0.5 Momentum Bonusu eklenir.")
 
     if st.button("✅ İki Listeyi İşle ve Kaydet", type="primary"):
         if file_cozenler is None and file_cozmeyenler is None:
             st.error("Lütfen en az bir Excel dosyası yükleyin.")
         else:
-            toplam_kayit = cift_excel_islem_ve_yukle(file_cozenler, file_cozmeyenler, secilen_ay, int(deneme_no), is_ay_sonu)
+            toplam_kayit = cift_excel_islem_ve_yukle(file_cozenler, file_cozmeyenler, secilen_ay, int(deneme_no), is_ay_sonu, secilen_sinif_yukleme)
             st.success(f"{secilen_ay} Ayı - Deneme {deneme_no}: Toplam {toplam_kayit} öğrenci verisi işlendi.")
             st.rerun()
 
@@ -515,11 +531,14 @@ with tab1:
             )
 
         st.write("")
-        goster = arama_listesi[["ogrenci_id", "ad_soyad", "telefon", "onceki_durum", "son_durum"]]
-        st.dataframe(goster, use_container_width=True, hide_index=True)
+        cols_to_show = ["ogrenci_id", "ad_soyad", "telefon", "sinif_seviyesi", "onceki_durum", "son_durum"]
+        cols_final = [c for c in cols_to_show if c in arama_listesi.columns]
+        
+        st.dataframe(arama_listesi[cols_final], use_container_width=True, hide_index=True)
 
         for _, r in arama_listesi.iterrows():
-            with st.expander(f"{r['ad_soyad']} (ID {r['ogrenci_id']})"):
+            sinif_bilgisi = f" - {r.get('sinif_seviyesi', '')}" if pd.notna(r.get('sinif_seviyesi')) else ""
+            with st.expander(f"{r['ad_soyad']} (ID {r['ogrenci_id']}){sinif_bilgisi}"):
                 msg_text = whatsapp_mesaji_olustur(r["ad_soyad"])
                 st.text_area("WhatsApp Mesajı", value=msg_text, height=100, key=f"msg_{r['ogrenci_id']}")
                 
@@ -552,15 +571,26 @@ with tab2:
     st.subheader("Scoreboard (Kümülatif)")
     siralanmis = metrikler.sort_values("toplam_puan", ascending=False).reset_index(drop=True)
     
-    arama_kw = st.text_input("🔍 Öğrenci Ara (İsim veya ID)", placeholder="Örn: İlkay veya 505658")
+    col_filter_1, col_filter_2 = st.columns([2, 1])
+    with col_filter_1:
+        arama_kw = st.text_input("🔍 Öğrenci Ara (İsim veya ID)", placeholder="Örn: İlkay veya 505658")
+    with col_filter_2:
+        secilen_sinif_filtre = st.selectbox("🎓 Sınıf Filtresi", options=SINIF_SEVIYELERI)
+
     if arama_kw:
         siralanmis = siralanmis[
             siralanmis["ad_soyad"].str.contains(arama_kw, case=False, na=False) |
             siralanmis["ogrenci_id"].astype(str).str.contains(arama_kw, na=False)
         ]
+        
+    if secilen_sinif_filtre != "Tüm Sınıflar" and "sinif_seviyesi" in siralanmis.columns:
+        siralanmis = siralanmis[siralanmis["sinif_seviyesi"] == secilen_sinif_filtre]
+
+    sb_cols = ["ogrenci_id", "ad_soyad", "sinif_seviyesi", "temel_puan", "momentum_bonusu", "toplam_puan"]
+    sb_cols_existing = [c for c in sb_cols if c in siralanmis.columns]
 
     st.dataframe(
-        siralanmis[["ogrenci_id", "ad_soyad", "temel_puan", "momentum_bonusu", "toplam_puan"]], 
+        siralanmis[sb_cols_existing], 
         use_container_width=True, 
         hide_index=True
     )
@@ -601,7 +631,13 @@ with tab3:
 # ===================================================================
 with tab4:
     st.subheader("👤 Öğrenci Profili ve Detaylı Geçmişi")
-    secim_listesi = df_ogrenciler.apply(lambda r: f"{r['ad_soyad']} (ID {r['ogrenci_id']})", axis=1).tolist()
+    
+    def format_ogrenci_label(r):
+        sinif = f" - {r['sinif_seviyesi']}" if pd.notna(r.get('sinif_seviyesi')) and r.get('sinif_seviyesi') else ""
+        return f"{r['ad_soyad']}{sinif} (ID {r['ogrenci_id']})"
+
+    secim_listesi = df_ogrenciler.apply(format_ogrenci_label, axis=1).tolist() if not df_ogrenciler.empty else []
+    
     if secim_listesi:
         secilen = st.selectbox("Öğrenci Seçin", secim_listesi)
         secilen_id = int(secilen.split("ID ")[1].rstrip(")"))
@@ -681,6 +717,7 @@ with tab5:
             "hafta_index": "Hafta",
             "ogrenci_id": "Öğrenci ID",
             "ad_soyad": "Ad Soyad",
+            "sinif_seviyesi": "Sınıf Seviyesi",
             "telefon": "Telefon",
             "arayan": "Arayan",
             "arama_sonucu": "Arama Sonucu",
