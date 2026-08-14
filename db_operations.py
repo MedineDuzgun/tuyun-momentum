@@ -133,7 +133,11 @@ def deneme_kaydi_sil(deneme_id: int) -> None:
             conn.close()
 
 def son_yuklemeyi_sil() -> tuple[bool, str]:
-    """Sistemdeki en son yuklenen hafta_index'e ait tüm deneme kayitlarini siler."""
+    """
+    Sistemdeki en son yüklenen hafta_index'e ait tüm deneme kayıtlarını siler.
+    Eğer silinen deneme 'Ay Sonu Denemesi' olarak işaretlendiyse, o aya ait kalan
+    kayıtların is_ay_sonu bayrağını da otomatik olarak FALSE yaparak bonusu geri alır.
+    """
     conn = get_conn()
     if not conn:
         return False, "Veritabanı bağlantısı kurulamadı."
@@ -145,20 +149,33 @@ def son_yuklemeyi_sil() -> tuple[bool, str]:
             if max_h_idx is None:
                 return False, "Silinecek deneme kaydı bulunamadı."
 
-            # O hafta_index'e ait bilgi (Ay ve Deneme No öğrenmek için)
-            cur.execute("SELECT ay_adi, deneme_no FROM deneme_kayitlari WHERE hafta_index = %s LIMIT 1", (max_h_idx,))
+            # Silinecek denemenin ay, deneme no ve ay sonu durumunu öğren
+            cur.execute(
+                "SELECT ay_adi, deneme_no, is_ay_sonu FROM deneme_kayitlari WHERE hafta_index = %s LIMIT 1", 
+                (max_h_idx,)
+            )
             row = cur.fetchone()
-            ay_bilgisi = f"{row[0]} - Deneme {row[1]}" if row else f"Hafta {max_h_idx}"
+            
+            ay_adi = row[0] if row else None
+            deneme_no = row[1] if row else None
+            was_ay_sonu = row[2] if row else False
+            ay_bilgisi = f"{ay_adi} - Deneme {deneme_no}" if row else f"Hafta {max_h_idx}"
 
-            # O hafta_index'e ait tüm kayıtları sil
+            # 1. En son yüklenen haftaya ait deneme kayıtlarını sil
             cur.execute("DELETE FROM deneme_kayitlari WHERE hafta_index = %s", (max_h_idx,))
             
-            # O haftaya yazılmış arama notu varsa onları da temizle
+            # 2. En son yüklenen haftaya yazılmış arama notları varsa temizle
             cur.execute("DELETE FROM arama_notlari WHERE hafta_index = %s", (max_h_idx,))
-            
+
+            # 3. Eğer silinen deneme bir 'Ay Sonu' denemesiyse, o ayın veritabanında kalan
+            #    diğer kayıtlarındaki is_ay_sonu bayrağını da FALSE yap (Momentum bonusunu iptal et)
+            if was_ay_sonu and ay_adi:
+                cur.execute("UPDATE deneme_kayitlari SET is_ay_sonu = FALSE WHERE ay_adi = %s", (ay_adi,))
+
             conn.commit()
             st.cache_data.clear()
-            return True, f"Son yüklenen '{ay_bilgisi}' (Index: {max_h_idx}) kaydı ve ilgili arama notları başarıyla silindi."
+            return True, f"Son yüklenen '{ay_bilgisi}' (Index: {max_h_idx}) silindi ve ay kapanış bonusu (Momentum) otomatik geri alındı."
+            
     except Exception as e:
         conn.rollback()
         return False, f"Silme işleminde hata oluştu: {e}"
