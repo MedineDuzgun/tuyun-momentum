@@ -40,7 +40,6 @@ def normalize_excel(uploaded_file, secilen_sinif_manuel: str = "Belirtilmedi") -
     df_raw = pd.read_excel(uploaded_file, header=None)
     header_idx = 0
 
-    # Başlık satırını bulma
     for i in range(min(10, len(df_raw))):
         row_str = " ".join([str(val).lower() for val in df_raw.iloc[i].values])
         if any(keyword in row_str for keyword in ["adi", "numarasi", "telefon", "soyad"]):
@@ -50,7 +49,6 @@ def normalize_excel(uploaded_file, secilen_sinif_manuel: str = "Belirtilmedi") -
     uploaded_file.seek(0)
     df = pd.read_excel(uploaded_file, header=header_idx)
 
-    # Sütun isimlerini standartlaştırma
     col_map = {}
     for col in df.columns:
         col_clean = str(col).strip().lower()
@@ -72,10 +70,8 @@ def normalize_excel(uploaded_file, secilen_sinif_manuel: str = "Belirtilmedi") -
     if "Telefon" not in df.columns:
         df["Telefon"] = ""
 
-    # İsim Temizliği
     df["Ad_Soyad"] = df["Ad_Soyad"].astype(str).str.replace("i̇", "i").str.replace("I", "ı").str.strip().str.title()
 
-    # AD + SOYAD + TELEFON HASH'LEME İLE BENZERSİZ ID ÜRETİMİ
     def generate_unique_id(row):
         val = str(row["Ogrenci_ID"]).split(".")[0].strip()
         name_clean = str(row["Ad_Soyad"]).strip().lower()
