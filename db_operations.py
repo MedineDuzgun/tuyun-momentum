@@ -132,6 +132,39 @@ def deneme_kaydi_sil(deneme_id: int) -> None:
         finally:
             conn.close()
 
+def son_yuklemeyi_sil() -> tuple[bool, str]:
+    """Sistemdeki en son yuklenen hafta_index'e ait tüm deneme kayitlarini siler."""
+    conn = get_conn()
+    if not conn:
+        return False, "Veritabanı bağlantısı kurulamadı."
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT MAX(hafta_index) FROM deneme_kayitlari")
+            max_h_idx = cur.fetchone()[0]
+
+            if max_h_idx is None:
+                return False, "Silinecek deneme kaydı bulunamadı."
+
+            # O hafta_index'e ait bilgi (Ay ve Deneme No öğrenmek için)
+            cur.execute("SELECT ay_adi, deneme_no FROM deneme_kayitlari WHERE hafta_index = %s LIMIT 1", (max_h_idx,))
+            row = cur.fetchone()
+            ay_bilgisi = f"{row[0]} - Deneme {row[1]}" if row else f"Hafta {max_h_idx}"
+
+            # O hafta_index'e ait tüm kayıtları sil
+            cur.execute("DELETE FROM deneme_kayitlari WHERE hafta_index = %s", (max_h_idx,))
+            
+            # O haftaya yazılmış arama notu varsa onları da temizle
+            cur.execute("DELETE FROM arama_notlari WHERE hafta_index = %s", (max_h_idx,))
+            
+            conn.commit()
+            st.cache_data.clear()
+            return True, f"Son yüklenen '{ay_bilgisi}' (Index: {max_h_idx}) kaydı ve ilgili arama notları başarıyla silindi."
+    except Exception as e:
+        conn.rollback()
+        return False, f"Silme işleminde hata oluştu: {e}"
+    finally:
+        conn.close()
+
 @st.cache_data(ttl=30, show_spinner=False)
 def tum_veriyi_oku():
     conn = get_conn()
