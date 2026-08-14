@@ -10,6 +10,7 @@ from db_operations import (
     deneme_kaydi_sil,
     init_db,
     ogrenci_metriklerini_hesapla,
+    son_yuklemeyi_sil,
     tum_veriyi_oku,
     veritabanini_sifirla,
 )
@@ -59,7 +60,25 @@ with st.sidebar:
 
     st.divider()
     st.subheader("⚙️ Sistem Yönetimi")
-    onay = st.checkbox("Verileri silmeyi onaylıyorum")
+
+    # --- YANLIŞ YÜKLEME DÜZELTME OPERASYONU ---
+    if not df_kayitlar_ozet.empty:
+        max_h = df_kayitlar_ozet["hafta_index"].max()
+        son_deneme_row = df_kayitlar_ozet[df_kayitlar_ozet["hafta_index"] == max_h].iloc[0]
+        son_deneme_tanim = f"{son_deneme_row['ay_adi']} - Deneme {son_deneme_row['deneme_no']} (Index: {max_h})"
+        
+        st.markdown(f"**Son Yüklenen:** {son_deneme_tanim}")
+        if st.button("↩️ Son Yüklenen Denemeyi Sil (Geri Al)", type="secondary", help="En son yüklediğiniz deneme kaydını tamamen veritabanından siler."):
+            ok, msg = son_yuklemeyi_sil()
+            if ok:
+                st.success(msg)
+                st.rerun()
+            else:
+                st.error(msg)
+        st.caption("Yanlış dosya veya ay seçimiyle yükleme yaptığınızda yukarıdaki butonla geri alabilirsiniz.")
+        st.divider()
+
+    onay = st.checkbox("Tüm verileri silmeyi onaylıyorum")
     if st.button("🗑️ Veritabanını Sıfırla", type="secondary"):
         if onay:
             veritabanini_sifirla()
